@@ -110,8 +110,8 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     ).toDF()
   }
 
-  protected def prepareDataframe(dataset: Dataset[_], numTasks: Int): DataFrame = {
-    val df = castColumns(dataset, getTrainingCols)
+    protected def prepareDataframe(dataset: Dataset[_], numTasks: Int): DataFrame = {
+      val df = castColumns(dataset, getTrainingCols)
     // Reduce number of partitions to number of executor tasks
     /* Note: with barrier execution mode we must use repartition instead of coalesce when
      * running on spark standalone.
@@ -378,7 +378,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       .appendParamValueIfNotThere("data_random_seed", get(dataRandomSeed).orElse(get(seed)))
       .result
 
-    // TODO do we need to add any of the new Dataset parameters here? (e.g. is_enable_sparse)
+    // TODO do we need to add any of the new Dataset parameters here? (e.g. is_enable_sparse) check
   }
 
   private def generateDataset(ac: BaseAggregatedColumns,
@@ -474,7 +474,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       val (aggregatedColumns, aggregatedValidationColumns) = prepareDatasets(
         inputRows, validationData, sharedState)
       // Return booster only from main worker to reduce network communication overhead
-      val returnBooster = getReturnBooster(isEnabledWorker, nodes, log, numTasksPerExec, localListenPort)
+      val returnBooster: Boolean = getReturnBooster(isEnabledWorker, nodes, log, numTasksPerExec, localListenPort)
       try {
         if (isEnabledWorker) {
           // If worker enabled, initialize the network ring of communication
@@ -586,12 +586,14 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
 
     val (inetAddress, port, future) = createDriverNodesThread(numTasks, df.sparkSession)
 
+    val sampleData = 0 // TODO
+
     /* Run a parallel job via map partitions to initialize the native library and network,
      * translate the data to the LightGBM in-memory representation and train the models
      */
     val encoder = Encoders.kryo[LightGBMBooster]
 
-    val trainParams = getTrainParams(numTasks, dataset, numTasksPerExec)
+    val trainParams: BaseTrainParams = getTrainParams(numTasks, dataset, numTasksPerExec)
 
     log.info(s"LightGBM parameters: ${trainParams.toString()}")
     val networkParams = NetworkParams(getDefaultListenPort, inetAddress, port, getUseBarrierExecutionMode)
@@ -609,8 +611,14 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     validateSlotNames(schema(getFeaturesCol))
 
     val sharedState = SharedSingleton(new SharedState(getColumnParams, schema, trainParams))
-    val mapPartitionsFunc = trainLightGBM(batchIndex, networkParams,
-      validationData, trainParams, numTasksPerExec, schema, sharedState.get)(_)
+    val mapPartitionsFunc = trainLightGBM(
+      batchIndex,
+      networkParams,
+      validationData,
+      trainParams,
+      numTasksPerExec,
+      schema,
+      sharedState.get)(_)
 
     val lightGBMBooster = if (getUseBarrierExecutionMode) {
       preprocessedDF.rdd.barrier().mapPartitions(mapPartitionsFunc).reduce((booster1, _) => booster1)
@@ -648,8 +656,8 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
 
   /** Allow algorithm specific preprocessing of dataset.
     *
-    * @param dataset The dataset to preprocess prior to training.
+    * @param df The data frame to preprocess prior to training.
     * @return The preprocessed data.
     */
-  protected def preprocessData(dataset: DataFrame): DataFrame = dataset
+  protected def preprocessData(df: DataFrame): DataFrame = df
 }

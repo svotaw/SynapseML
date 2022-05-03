@@ -90,27 +90,31 @@ object LightGBMUtils {
                        hostAndPorts: ListBuffer[(Socket, String)],
                        hostToMinPartition: mutable.Map[String, String]): ConnectionState = {
     log.info("driver accepting a new connection...")
-    val driverSocket = driverServerSocket.accept()
+
+    val driverSocket = driverServerSocket.accept()  // block until connection is made
+
     val reader = new BufferedReader(new InputStreamReader(driverSocket.getInputStream))
     val comm = reader.readLine()
-    if (comm == LightGBMConstants.FinishedStatus) {
-      log.info("driver received all tasks from barrier stage")
-      Finished
-    } else if (comm.startsWith(LightGBMConstants.IgnoreStatus)) {
-      log.info("driver received ignore status from task")
-      val hostPartition = comm.split(":")
-      val host = hostPartition(1)
-      val partitionId = hostPartition(2)
-      updateHostToMinPartition(hostToMinPartition, host, partitionId)
-      EmptyTask
-    } else {
-      val hostPortPartition = comm.split(":")
-      val host = hostPortPartition(0)
-      val port = hostPortPartition(1)
-      val partitionId = hostPortPartition(2)
-      updateHostToMinPartition(hostToMinPartition, host, partitionId)
-      addSocketAndComm(hostAndPorts, log, s"$host:$port", driverSocket)
-      Connected
+    comm match
+    {
+      case LightGBMConstants.FinishedStatus =>
+        log.info("driver received all tasks from barrier stage")
+        Finished
+      case status if (status.startsWith(LightGBMConstants.IgnoreStatus)) =>
+        log.info("driver received ignore status from task")
+        val hostPartition = comm.split(":")
+        val host = hostPartition(1)
+        val partitionId = hostPartition(2)
+        updateHostToMinPartition(hostToMinPartition, host, partitionId)
+        EmptyTask
+      case _ =>
+        val hostPortPartition = comm.split(":")
+        val host = hostPortPartition(0)
+        val port = hostPortPartition(1)
+        val partitionId = hostPortPartition(2)
+        updateHostToMinPartition(hostToMinPartition, host, partitionId)
+        addSocketAndComm(hostAndPorts, log, s"$host:$port", driverSocket)
+        Connected
     }
   }
 
