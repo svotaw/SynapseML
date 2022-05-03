@@ -81,11 +81,11 @@ class LightGBMRanker(override val uid: String)
   override def getOptGroupCol: Option[String] = Some(getGroupCol)
 
   /** For Ranking, we need to sort the data within partitions by group prior to training to ensure training succeeds.
-    * @param dataset The dataset to preprocess prior to training.
-    * @return The preprocessed data, sorted within partiton by group.
+    * @param df The data frame to preprocess prior to training.
+    * @return The preprocessed data, sorted within partition by group.
     */
-  override def preprocessData(dataset: DataFrame): DataFrame = {
-    dataset.sortWithinPartitions(getOptGroupCol.get)
+  override def preprocessData(df: DataFrame): DataFrame = {
+    df.sortWithinPartitions(getOptGroupCol.get)
   }
 
   override def copy(extra: ParamMap): LightGBMRanker = defaultCopy(extra)
@@ -99,7 +99,7 @@ class LightGBMRanker(override val uid: String)
 
           // in barrier mode, will use repartition in super.prepareDataframe,
           // this will let repartition on groupingCol fail
-          // so repartition here, then super.prepareDataframe won't repartion
+          // so repartition here, then super.prepareDataframe won't repartition
           if (getUseBarrierExecutionMode) {
             if (numPartitions > numTasks) {
               dataset.repartition(numTasks, new Column(groupingCol))

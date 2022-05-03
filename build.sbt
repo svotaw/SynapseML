@@ -14,6 +14,8 @@ name := "synapseml"
 ThisBuild / organization := "com.microsoft.azure"
 ThisBuild / scalaVersion := "2.12.15"
 
+// Compile / unmanagedJars += file("lib/lightgbmlib.jar")
+
 val scalaMajorVersion = 2.12
 
 val excludes = Seq(
@@ -277,7 +279,6 @@ lazy val lightgbm = (project in file("lightgbm"))
   .enablePlugins(SbtPlugin)
   .dependsOn(core % "test->test;compile->compile")
   .settings(settings ++ Seq(
-    libraryDependencies += ("com.microsoft.ml.lightgbm" % "lightgbmlib" % "3.2.110"),
     name := "synapseml-lightgbm"
   ): _*)
 
