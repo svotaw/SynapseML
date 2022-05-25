@@ -6,13 +6,13 @@ package com.microsoft.azure.synapse.ml.lightgbm
 import com.microsoft.azure.synapse.ml.core.utils.{ClusterUtil, ParamsStringBuilder}
 import com.microsoft.azure.synapse.ml.io.http.SharedSingleton
 import com.microsoft.azure.synapse.ml.lightgbm.ConnectionState.Finished
-import com.microsoft.azure.synapse.ml.lightgbm.LightGBMUtils.{closeConnections, getExecutorId, getPartitionId,
-  handleConnection, sendDataToExecutors}
+import com.microsoft.azure.synapse.ml.lightgbm.LightGBMUtils.{closeConnections, getExecutorId, getPartitionId, handleConnection, sendDataToExecutors}
 import com.microsoft.azure.synapse.ml.lightgbm.TaskTrainingMethods.{isWorkerEnabled, prepareDatasets}
 import com.microsoft.azure.synapse.ml.lightgbm.TrainUtils._
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{BaseAggregatedColumns, DatasetUtils, LightGBMDataset}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{BaseAggregatedColumns, DatasetUtils, LightGBMDataset, SampledData}
 import com.microsoft.azure.synapse.ml.lightgbm.params._
+import com.microsoft.azure.synapse.ml.lightgbm.swig.SwigUtils
 import com.microsoft.azure.synapse.ml.logging.BasicLogging
 import com.microsoft.ml.lightgbm.lightgbmlib
 import org.apache.spark.broadcast.Broadcast
@@ -57,13 +57,13 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
           val batchIndex = datasetWithIndex._2
 
           beforeTrainBatch(batchIndex, dataset, model)
-          val newModel = innerTrain(dataset, batchIndex)
+          val newModel = trainOneDataset(dataset, batchIndex)
           afterTrainBatch(batchIndex, dataset, newModel)
 
           Some(newModel)
         }.get
       } else {
-        innerTrain(dataset, batchIndex = 0)
+        trainOneDataset(dataset, batchIndex = 0)
       }
     })
   }
@@ -250,7 +250,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     *
     * @return GeneralParams object containing parameters related to general LightGBM parameters.
     */
-  protected def getGeneralParams(numTasks: Int,  dataset: Dataset[_], numTasksPerExec: Int): GeneralParams = {
+  protected def getGeneralParams(numTasks: Int,  dataset: Dataset[_]): GeneralParams = {
     GeneralParams(
       getParallelism,
       get(topK),
@@ -398,6 +398,18 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     dataset
   }
 
+  private def createDatasetFromReference(serializedDataset: Array[Byte], datasetParams: String): LightGBMDataset = {
+    val pointer = lightgbmlib.voidpp_handle()
+    // Convert byte array to native memory
+    val nativeByteArray = SwigUtils.byteArrayToNative(serializedDataset)
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSerializedReference(
+      nativeByteArray.,
+      serializedDataset.length,
+      datasetParams,
+      pointer), "Dataset create")
+
+    new LightGBMDataset(lightgbmlib.voidpp_value(pointer))
+  }
 
   private def translate(batchIndex: Int,
                         validationData: Option[BaseAggregatedColumns],
@@ -446,14 +458,14 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     }
   }
 
-  private def trainLightGBM(batchIndex: Int,
-                            networkParams: NetworkParams,
-                            validationData: Option[Broadcast[Array[Row]]],
-                            trainParams: BaseTrainParams,
-                            numTasksPerExec: Int,
-                            schema: StructType,
-                            sharedState: SharedState)
-                   (inputRows: Iterator[Row]): Iterator[LightGBMBooster] = {
+  private def trainOnPartition(batchIndex: Int,
+                              networkParams: NetworkParams,
+                              validationData: Option[Broadcast[Array[Row]]],
+                              trainParams: BaseTrainParams,
+                              numTasksPerExec: Int,
+                              schema: StructType,
+                              sharedState: SharedState)
+                            (inputRows: Iterator[Row]): Iterator[LightGBMBooster] = {
     if (trainParams.generalParams.verbosity > 1) {
       log.info(s"LightGBM partition $getPartitionId running on executor $getExecutorId")
     }
@@ -572,32 +584,24 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * @param batchIndex In running in batch training mode, gets the batch number.
     * @return The LightGBM Model from the trained LightGBM Booster.
     */
-  protected def innerTrain(dataset: Dataset[_], batchIndex: Int): TrainedModel = {
-    val sc = dataset.sparkSession.sparkContext
-    val numTasksPerExec = ClusterUtil.getNumTasksPerExecutor(dataset, log)
+  protected def trainOneDataset(dataset: Dataset[_], batchIndex: Int): TrainedModel = {
+    val numTasksPerExecutor = ClusterUtil.getNumTasksPerExecutor(dataset, log)
     // By default, we try to intelligently calculate the number of executors, but user can override this with numTasks
     val numTasks =
       if (getNumTasks > 0) getNumTasks
       else {
-        val numExecutorTasks = ClusterUtil.getNumExecutorTasks(dataset.sparkSession, numTasksPerExec, log)
+        val numExecutorTasks = ClusterUtil.getNumExecutorTasks(dataset.sparkSession, numTasksPerExecutor, log)
         min(numExecutorTasks, dataset.rdd.getNumPartitions)
       }
     val df = prepareDataframe(dataset, numTasks)
 
-    val (inetAddress, port, future) = createDriverNodesThread(numTasks, df.sparkSession)
 
-    val sampleData = 0 // TODO
+    // TODO val useTwoPass = getExecutionMode()
+    // val sampleData = 0 // TODO
 
-    /* Run a parallel job via map partitions to initialize the native library and network,
-     * translate the data to the LightGBM in-memory representation and train the models
-     */
-    val encoder = Encoders.kryo[LightGBMBooster]
 
-    val trainParams: BaseTrainParams = getTrainParams(numTasks, dataset, numTasksPerExec)
 
-    log.info(s"LightGBM parameters: ${trainParams.toString()}")
-    val networkParams = NetworkParams(getDefaultListenPort, inetAddress, port, getUseBarrierExecutionMode)
-
+    val sc = dataset.sparkSession.sparkContext
     val (trainingData, validationData) =
       if (get(validationIndicatorCol).isDefined && dataset.columns.contains(getValidationIndicatorCol))
         (df.filter(x => !x.getBoolean(x.fieldIndex(getValidationIndicatorCol))),
@@ -606,24 +610,103 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       else (df, None)
 
     val preprocessedDF = preprocessData(trainingData)
-    val schema = preprocessedDF.schema
 
-    validateSlotNames(schema(getFeaturesCol))
+    // TODO just pass schema, not whole dataframe
+    val trainParams: BaseTrainParams = getTrainParams(numTasks, preprocessedDF, numTasksPerExecutor)
+    log.info(s"LightGBM parameters: ${trainParams.toString()}")
 
+    validateSlotNames(preprocessedDF.schema(getFeaturesCol))
+    trainingPass(preprocessedDF, validationData, batchIndex, numTasks, numTasksPerExecutor)
+  }
+
+  /**
+    * Inner train method for LightGBM learners.  Calculates the number of workers,
+    * creates a driver thread, and runs mapPartitions on the dataset.
+    *
+    * @param dataset    The dataset to train on.
+    * @param batchIndex In running in batch training mode, gets the batch number.
+    * @return The LightGBM Model from the trained LightGBM Booster.
+    */
+  protected def statisticsPass(dataframe: DataFrame, trainParams: BaseTrainParams): TrainedModel = {
+    // Get the row counts per partition
+    val partitionRowCounts: Array[(Int, Long)] = dataframe
+      .rdd
+      .mapPartitionsWithIndex({case (i,rows) => Iterator((i,rows.size.toLong))}, true)
+      .collect()
+    val totalNumRows = partitionRowCounts.map(partition => partition._2).sum
+
+    // Get sample data using sample() function in Spark
+    // TODO optimize with just a take() in case of user approval
+    val sampleCount: Int = getBinSampleCount
+    val seed: Int = getSeedParams.dataRandomSeed.get // TODO data or just plain seed?
+    val featureColName = getFeaturesCol
+    // TODO what if error causes < sampleCount?  should we add a little buffer and let limit() do the work?
+    val fraction = if (sampleCount > totalNumRows) totalNumRows else Math.min(1.0, (sampleCount.toDouble + 10000)/totalNumRows)
+    val rawSampleData = dataframe.select(dataframe.col(featureColName)).sample(fraction, seed).limit(sampleCount)
+
+    // Make a wrapped object that formats the binary sample data as needed by LightGBM
+    val numCols = ??
+    val sampleData = new SampledData(sampleCount, numCols)
+    rawSampleData.foreach(row => sampleData.pushRow(row, featureColName))
+
+    // Get reference data set using sampled data
+    // Use driver node to run LightGBM in standalone
+    LightGBMUtils.initializeNativeLibrary()
+    logInfo(s"LightGBM task generating schema for empty dense dataset with $totalNumRows rows and $numCols columns")
+    // Generate the dataset for features
+    val pointer = lightgbmlib.voidpp_handle()
+    val datasetParams = getDatasetCreationParams(
+      trainParams.generalParams.categoricalFeatures,
+      trainParams.executionParams.numThreads)
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSampledColumn(
+      sampleData.getSampleData(),
+      sampleData.getSampleIndices(),
+      numCols,
+      sampleData.getRowCounts(),
+      sampleData.numRows,
+      totalNumRows.toInt,
+      datasetParams,
+      pointer), "Dataset create")
+
+  }
+
+  /**
+    * Run a parallel job via map partitions to initialize the native library and network,
+    * translate the data to the LightGBM in-memory representation and train the models.
+    *
+    * @param dataframe    The dataset to train on.
+    * @param batchIndex In running in batch training mode, gets the batch number.
+    * @return The LightGBM Model from the trained LightGBM Booster.
+    */
+  protected def trainingPass(dataframe: DataFrame,
+                             validationData: Option[Broadcast[Array[Row]]],
+                             lgbmSerializedReferenceDataset: Option[Broadcast[Array[Byte]]],
+                             trainParams: BaseTrainParams,
+                             batchIndex: Int,
+                             numTasks: Int,
+                             numTasksPerExecutor: Int): TrainedModel = {
+
+
+    val (inetAddress, port, future) = createDriverNodesThread(numTasks, dataframe.sparkSession)
+
+    val networkParams = NetworkParams(getDefaultListenPort, inetAddress, port, getUseBarrierExecutionMode)
+    val schema = dataframe.schema
     val sharedState = SharedSingleton(new SharedState(getColumnParams, schema, trainParams))
-    val mapPartitionsFunc = trainLightGBM(
+
+    val mapPartitionsFunc = trainOnPartition(
       batchIndex,
       networkParams,
       validationData,
       trainParams,
-      numTasksPerExec,
+      numTasksPerExecutor,
       schema,
       sharedState.get)(_)
 
+    val encoder = Encoders.kryo[LightGBMBooster]
     val lightGBMBooster = if (getUseBarrierExecutionMode) {
-      preprocessedDF.rdd.barrier().mapPartitions(mapPartitionsFunc).reduce((booster1, _) => booster1)
+      dataframe.rdd.barrier().mapPartitions(mapPartitionsFunc).reduce((booster1, _) => booster1)
     } else {
-      preprocessedDF.mapPartitions(mapPartitionsFunc)(encoder).reduce((booster1, _) => booster1)
+      dataframe.mapPartitions(mapPartitionsFunc)(encoder).reduce((booster1, _) => booster1)
     }
 
     // Wait for future to complete (should be done by now)

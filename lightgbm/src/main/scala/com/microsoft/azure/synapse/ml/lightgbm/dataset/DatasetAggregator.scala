@@ -433,8 +433,8 @@ private[lightgbm] abstract class BaseDenseAggregatedColumns(chunkSize: Int) exte
   // Determine whether we are streaming (requires sample data) or bulk
   def generateDataset(referenceDataset: Option[LightGBMDataset],
                       datasetParams: String): LightGBMDataset = {
-    val useSteaming = true
-    if (useSteaming) generateDenseDatasetByStreaming(createSampledData(datasetParams), datasetParams)
+    val useStreaming = true
+    if (useStreaming) generateDenseDatasetByStreaming(createSampledData(datasetParams), datasetParams)
     else generateDenseDatasetByBulk(referenceDataset, datasetParams)
   }
 
@@ -454,7 +454,7 @@ private[lightgbm] abstract class BaseDenseAggregatedColumns(chunkSize: Int) exte
   }
 
   def generateDenseDatasetByStreaming(sampleData: SampledData,
-                                 datasetParams: String): LightGBMDataset = {
+                                      datasetParams: String): LightGBMDataset = {
     val pointer = lightgbmlib.voidpp_handle()
     try {
       val totalNumRows = rowCount.get().toInt

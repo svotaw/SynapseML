@@ -55,7 +55,7 @@ class LightGBMRanker(override val uid: String)
       getEvalAt,
       get(isProvideTrainingMetric),
       getDelegate,
-      getGeneralParams(numTasks, dataset, numTasksPerExec),
+      getGeneralParams(numTasks, dataset),
       getDatasetParams,
       getDartParams,
       getExecutionParams(numTasksPerExec),

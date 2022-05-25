@@ -64,7 +64,7 @@ class LightGBMRegressor(override val uid: String)
       getBoostFromAverage,
       get(isProvideTrainingMetric),
       getDelegate,
-      getGeneralParams(numTasks, dataset, numTasksPerExec),
+      getGeneralParams(numTasks, dataset),
       getDatasetParams,
       getDartParams,
       getExecutionParams(numTasksPerExec),

@@ -35,6 +35,13 @@ object SwigUtils extends Serializable {
       lightgbmlib.floatArray_setitem(colArray, ri._2.toLong, ri._1.toFloat))
     colArray
   }
+
+  def byteArrayToNative(array: Array[Byte]): SWIGTYPE_p_byte = {
+    val colArray = lightgbmlib.new_byteArray(array.length)
+    array.zipWithIndex.foreach(ri =>
+      lightgbmlib.byteArray_setitem(colArray, ri._2.toLong, ri._1.toFloat))
+    colArray
+  }
 }
 
 abstract class ChunkedArray[T]() {
