@@ -4,8 +4,11 @@
 package com.microsoft.azure.synapse.ml.lightgbm.dataset
 
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
+import org.apache.spark.sql.Row
+import com.microsoft.azure.synapse.ml.lightgbm.LightGBMUtils
 import com.microsoft.azure.synapse.ml.lightgbm.swig._
 import com.microsoft.ml.lightgbm._
+
 
 /** SampledData: Encapsulates the sampled data need to initialize a LightGBM dataset.
   * .
@@ -39,6 +42,16 @@ class SampledData(val numRows: Int, val numCols: Int) {
     val columnIndexes = new IntSwigArray(numRows);
     sampleIndexes.setItem(col, columnIndexes)
   })
+
+  // Store non-zero elements in arrays given a dense feature value row
+  def pushRow(rowData: Row, featureColName: String): Unit = {
+    val data = rowData.getAs[Any](featureColName)
+    data match {
+      case sparse: SparseVector => pushRow(sparse)
+      case dense: DenseVector => pushRow(dense)
+      case _ => throw new IllegalArgumentException("Unknown row data type to push")
+    }
+  }
 
   // Store non-zero elements in arrays given a dense feature value row
   def pushRow(rowData: DenseVector): Unit = pushRow(rowData.values)
