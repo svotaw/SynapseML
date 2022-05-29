@@ -6,23 +6,19 @@ package com.microsoft.azure.synapse.ml.lightgbm
 import com.microsoft.azure.synapse.ml.core.env.StreamUtilities._
 import com.microsoft.azure.synapse.ml.core.utils.FaultToleranceUtils
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.LightGBMDataset
-import com.microsoft.azure.synapse.ml.lightgbm.params.{ClassifierTrainParams, BaseTrainParams}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset, SampledData}
+import com.microsoft.azure.synapse.ml.lightgbm.params.{BaseTrainParams, ClassifierTrainParams}
 import com.microsoft.ml.lightgbm._
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.{BarrierTaskContext, TaskContext}
 import org.slf4j.Logger
 
 import java.io._
 import java.net._
 
-case class NetworkParams(defaultListenPort: Int, addr: String, port: Int, barrierExecutionMode: Boolean)
-case class ColumnParams(labelColumn: String, featuresColumn: String, weightColumn: Option[String],
-                        initScoreColumn: Option[String], groupColumn: Option[String])
-
 private object TrainUtils extends Serializable {
 
-  def createBooster(trainParams: BaseTrainParams, trainDatasetPtr: LightGBMDataset,
+  def createBooster(trainParams: BaseTrainParams,
+                    trainDatasetPtr: LightGBMDataset,
                     validDatasetPtr: Option[LightGBMDataset]): LightGBMBooster = {
     // Create the booster
     val parameters = trainParams.toString()
@@ -36,175 +32,241 @@ private object TrainUtils extends Serializable {
     booster
   }
 
-  def beforeTrainIteration(batchIndex: Int, partitionId: Int, curIters: Int, log: Logger,
-                           trainParams: BaseTrainParams, booster: LightGBMBooster, hasValid: Boolean): Unit = {
-    if (trainParams.delegate.isDefined) {
-      trainParams.delegate.get.beforeTrainIteration(batchIndex, partitionId, curIters, log, trainParams, booster,
-        hasValid)
+  def beforeTrainIteration(state: PartitionTaskTrainingState): Unit = {
+    if (state.ctx.trainingParams.delegate.isDefined) {
+      state.ctx.trainingParams.delegate.get.beforeTrainIteration(state.ctx.batchIndex,
+                                                    state.partitionId,
+                                                    state.iteration,
+                                                    state.ctx.log,
+                                                    state.ctx.trainingParams,
+                                                    state.booster,
+                                                    state.ctx.hasValid)
     }
   }
 
-  def afterTrainIteration(batchIndex: Int, partitionId: Int, curIters: Int, log: Logger,
-                          trainParams: BaseTrainParams, booster: LightGBMBooster, hasValid: Boolean,
-                          isFinished: Boolean,
+  def afterTrainIteration(state: PartitionTaskTrainingState,
                           trainEvalResults: Option[Map[String, Double]],
                           validEvalResults: Option[Map[String, Double]]): Unit = {
-    if (trainParams.delegate.isDefined) {
-      trainParams.delegate.get.afterTrainIteration(batchIndex, partitionId, curIters, log, trainParams, booster,
-        hasValid, isFinished, trainEvalResults, validEvalResults)
+    val info = state.ctx
+    if (info.trainingParams.delegate.isDefined) {
+      info.trainingParams.delegate.get.afterTrainIteration(info.batchIndex,
+        state.partitionId,
+        state.iteration,
+        info.log,
+        info.trainingParams,
+        state.booster,
+        info.hasValid,
+        state.isFinished,
+        trainEvalResults,
+        validEvalResults)
     }
   }
 
-  def getLearningRate(batchIndex: Int, partitionId: Int, curIters: Int, log: Logger, trainParams: BaseTrainParams,
-                      previousLearningRate: Double): Double = {
-    trainParams.delegate match {
-      case Some(delegate) => delegate.getLearningRate(batchIndex, partitionId, curIters, log, trainParams,
-          previousLearningRate)
-      case None => previousLearningRate
+  def getLearningRate(state: PartitionTaskTrainingState): Double = {
+    state.ctx.trainingParams.delegate match {
+      case Some(delegate) => delegate.getLearningRate(state.ctx.batchIndex,
+                                                      state.partitionId,
+                                                      state.iteration,
+                                                      state.ctx.log,
+                                                      state.ctx.trainingParams,
+                                                      state.learningRate)
+      case None => state.learningRate
     }
   }
 
-  def updateOneIteration(trainParams: BaseTrainParams,
-                         booster: LightGBMBooster,
-                         log: Logger,
-                         iters: Int): Boolean = {
-    var isFinished = false
+  def getReferenceDataset(numRows: Int,
+                          numCols: Int,
+                          datasetParams: String,
+                          sampleData: SampledData,
+                          log: Logger): Array[Byte] = {
+    LightGBMUtils.initializeNativeLibrary()
+    log.info(s"LightGBM task generating schema for empty dense dataset with $numRows rows and $numCols columns")
+    // Generate the dataset for features
+    val dataset = lightgbmlib.voidpp_handle()
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSampledColumn(
+      sampleData.getSampleData(),
+      sampleData.getSampleIndices(),
+      numCols,
+      sampleData.getRowCounts(),
+      sampleData.numRows,
+      numRows,
+      datasetParams,
+      dataset), "Dataset create")
+
+    val buffer = lightgbmlib.voidpp_handle()
+    val datasetHandle = lightgbmlib.voidpp_value(dataset)
+    val lenPtr = lightgbmlib.new_intp()
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetSerializeReferenceToBinary(
+      datasetHandle,
+      buffer,
+      lenPtr), "Serialize ref")
+    val bufferLen: Int = lightgbmlib.intp_value(lenPtr)
+    lightgbmlib.delete_intp(lenPtr)
+
+    val serializedReference = new Array[Byte](bufferLen)
+    val valPtr = lightgbmlib.new_bytep()
+    val bufferHandle = lightgbmlib.voidpp_value(buffer)
+    (0 until bufferLen).foreach(i => {
+      LightGBMUtils.validate(lightgbmlib.LGBM_ByteBufferGetAt(bufferHandle, i, valPtr),"Buffer getat")
+      serializedReference(i) = lightgbmlib.bytep_value(valPtr).toByte
+    })
+    lightgbmlib.delete_bytep(valPtr)
+
+    LightGBMUtils.validate(lightgbmlib.LGBM_ByteBufferFree(bufferHandle),"Buffer free")
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetHandle),"Dataset free")
+    serializedReference
+  }
+
+  def updateOneIteration(state: PartitionTaskTrainingState): Unit = {
     try {
-        if (trainParams.objectiveParams.fobj.isDefined) {
-          val classification = trainParams.isInstanceOf[ClassifierTrainParams]
-          val (gradient, hessian) = trainParams.objectiveParams.fobj.get.getGradient(
-            booster.innerPredict(0, classification), booster.trainDataset.get)
-          isFinished = booster.updateOneIterationCustom(gradient, hessian)
+        val fobj = state.ctx.trainingParams.objectiveParams.fobj
+        if (fobj.isDefined) {
+          val isClassification = state.ctx.isClassification
+          val (gradient, hessian) = fobj.get.getGradient(
+            state.booster.innerPredict(0, isClassification), state.booster.trainDataset.get)
+          state.isFinished = state.booster.updateOneIterationCustom(gradient, hessian)
         } else {
-          isFinished = booster.updateOneIteration()
+          state.isFinished = state.booster.updateOneIteration()
         }
-      log.info("LightGBM running iteration: " + iters + " with is finished: " + isFinished)
+      state.log.info("LightGBM running iteration: " + state.iteration + " with is finished: " + state.isFinished)
     } catch {
       case e: java.lang.Exception =>
-        log.warn("LightGBM reached early termination on one task," +
+        state.log.warn("LightGBM reached early termination on one task," +
           " stopping training on task. This message should rarely occur." +
           " Inner exception: " + e.toString)
-        isFinished = true
+        state.isFinished = true
     }
-    isFinished
   }
 
-  def trainCore(batchIndex: Int, trainParams: BaseTrainParams, booster: LightGBMBooster,
-                log: Logger, hasValid: Boolean): Option[Int] = {
-    var isFinished = false
-    var iters = 0
-    val evalNames = booster.getEvalNames()
-    val evalCounts = evalNames.length
-    val bestScore = new Array[Double](evalCounts)
-    val bestScores = new Array[Array[Double]](evalCounts)
-    val bestIter = new Array[Int](evalCounts)
-    val partitionId = TaskContext.getPartitionId
-    var learningRate: Double = trainParams.generalParams.learningRate
-    var bestIterResult: Option[Int] = None
-    while (!isFinished && iters < trainParams.generalParams.numIterations) {
-      beforeTrainIteration(batchIndex, partitionId, iters, log, trainParams, booster, hasValid)
-      val newLearningRate = getLearningRate(batchIndex, partitionId, iters, log, trainParams,
-        learningRate)
-      if (newLearningRate != learningRate) {
-        log.info(s"LightGBM task calling booster.resetParameter to reset learningRate" +
+  def executeTrainingIterations(state: PartitionTaskTrainingState): Option[Int] = {
+    def iterationLoop(maxIterations: Int): Option[Int] = {
+      beforeTrainIteration(state)
+      val newLearningRate = getLearningRate(state)
+      if (newLearningRate != state.learningRate) {
+        state.log.info(s"LightGBM task calling booster.resetParameter to reset learningRate" +
           s" (newLearningRate: $newLearningRate)")
-        booster.resetParameter(s"learning_rate=$newLearningRate")
-        learningRate = newLearningRate
+        state.booster.resetParameter(s"learning_rate=$newLearningRate")
+        state.learningRate = newLearningRate
       }
 
-      isFinished = updateOneIteration(trainParams, booster, log, iters)
+      updateOneIteration(state)
 
       val trainEvalResults: Option[Map[String, Double]] =
-        if (trainParams.isProvideTrainingMetric.getOrElse(false) && !isFinished) {
-          val evalResults: Array[(String, Double)] = booster.getEvalResults(evalNames, 0)
-          evalResults.foreach { case (evalName: String, score: Double) => log.info(s"Train $evalName=$score") }
-          Option(Map(evalResults:_*))
-        } else {
-          None
-        }
+        if (state.ctx.isProvideTrainingMetric && !state.isFinished) getTrainEvalResults(state)
+        else None
 
-      val validEvalResults: Option[Map[String, Double]] = if (hasValid && !isFinished) {
-        val evalResults: Array[(String, Double)] = booster.getEvalResults(evalNames, 1)
-        val results: Array[(String, Double)] = evalResults.zipWithIndex.map { case ((evalName, evalScore), index) =>
-          log.info(s"Valid $evalName=$evalScore")
-          val cmp =
-            if (evalName.startsWith("auc") || evalName.startsWith("ndcg@") || evalName.startsWith("map@") ||
-              evalName.startsWith("average_precision"))
-              (x: Double, y: Double, tol: Double) => x - y > tol
-            else
-              (x: Double, y: Double, tol: Double) => x - y < tol
-          if (bestScores(index) == null
-              || cmp(evalScore, bestScore(index), trainParams.generalParams.improvementTolerance)) {
-            bestScore(index) = evalScore
-            bestIter(index) = iters
-            bestScores(index) = evalResults.map(_._2)
-          } else if (iters - bestIter(index) >= trainParams.generalParams.earlyStoppingRound) {
-            isFinished = true
-            log.info("Early stopping, best iteration is " + bestIter(index))
-            bestIterResult = Some(bestIter(index))
-          }
+      val validEvalResults: Option[Map[String, Double]] =
+        if (state.ctx.hasValid && !state.isFinished) getValidEvalResults(state)
+        else None
 
-          (evalName, evalScore)
-        }
+      afterTrainIteration(state, trainEvalResults, validEvalResults)
 
-        Option(Map(results:_*))
+      state.iteration = state.iteration + 1
+      if (!state.isFinished && state.iteration < maxIterations) {
+        iterationLoop(maxIterations)  // tail recursion
       } else {
-        None
+        state.bestIterResult
+      }
+    }
+
+    iterationLoop(state.ctx.trainingParams.generalParams.numIterations)
+  }
+
+  def getTrainEvalResults(state: PartitionTaskTrainingState): Option[Map[String, Double]] = {
+    val evalResults: Array[(String, Double)] = state.booster.getEvalResults(state.evalNames, 0)
+    evalResults.foreach { case (evalName: String, score: Double) => state.log.info(s"Train $evalName=$score") }
+    Option(Map(evalResults: _*))
+  }
+
+  def getValidEvalResults(state: PartitionTaskTrainingState): Option[Map[String, Double]] = {
+    val evalResults: Array[(String, Double)] = state.booster.getEvalResults(state.evalNames, 1)
+    val results: Array[(String, Double)] = evalResults.zipWithIndex.map { case ((evalName, evalScore), index) =>
+      state.log.info(s"Valid $evalName=$evalScore")
+      val cmp =
+        if (evalName.startsWith("auc")
+            || evalName.startsWith("ndcg@")
+            || evalName.startsWith("map@")
+            || evalName.startsWith("average_precision"))
+          (x: Double, y: Double, tol: Double) => x - y > tol
+        else
+          (x: Double, y: Double, tol: Double) => x - y < tol
+      if (state.bestScores(index) == null
+          || cmp(evalScore, state.bestScore(index), state.ctx.improvementTolerance)) {
+        state.bestScore(index) = evalScore
+        state.bestIter(index) = state.iteration
+        state.bestScores(index) = evalResults.map(_._2)
+      } else if (state.iteration - state.bestIter(index) >= state.ctx.earlyStoppingRound) {
+        state.isFinished = true
+        state.log.info("Early stopping, best iteration is " + state.bestIter(index))
+        state.bestIterResult = Some(state.bestIter(index))
       }
 
-      afterTrainIteration(batchIndex, partitionId, iters, log, trainParams, booster, hasValid, isFinished,
-        trainEvalResults, validEvalResults)
-
-      iters = iters + 1
+      (evalName, evalScore)
     }
-    bestIterResult
+    Option(Map(results: _*))
   }
 
-  def beforeGenerateTrainDataset(batchIndex: Int, columnParams: ColumnParams, schema: StructType,
-                                 log: Logger, trainParams: BaseTrainParams): Unit = {
-    if(trainParams.delegate.isDefined) {
-      trainParams.delegate.get.beforeGenerateTrainDataset(batchIndex, TaskContext.getPartitionId, columnParams,
-        schema, log, trainParams)
-    }
-  }
-
-  def afterGenerateTrainDataset(batchIndex: Int, columnParams: ColumnParams, schema: StructType,
-                                 log: Logger, trainParams: BaseTrainParams): Unit = {
-    if(trainParams.delegate.isDefined) {
-      trainParams.delegate.get.afterGenerateTrainDataset(batchIndex, TaskContext.getPartitionId, columnParams,
-        schema, log, trainParams)
+  def beforeGenerateTrainDataset(ctx: TrainingContext): Unit = {
+    if (ctx.trainingParams.delegate.isDefined) {
+      ctx.trainingParams.delegate.get.beforeGenerateTrainDataset(
+        ctx.batchIndex,
+        TaskContext.getPartitionId,
+        ctx.columnParams,
+        ctx.schema,
+        ctx.log,
+        ctx.trainingParams)
     }
   }
 
-  def beforeGenerateValidDataset(batchIndex: Int, columnParams: ColumnParams, schema: StructType,
-                                 log: Logger, trainParams: BaseTrainParams): Unit = {
-    if(trainParams.delegate.isDefined) {
-      trainParams.delegate.get.beforeGenerateValidDataset(batchIndex, TaskContext.getPartitionId, columnParams,
-        schema, log, trainParams)
+  def afterGenerateTrainDataset(ctx: TrainingContext): Unit = {
+    if (ctx.trainingParams.delegate.isDefined) {
+      ctx.trainingParams.delegate.get.afterGenerateTrainDataset(
+        ctx.batchIndex,
+        TaskContext.getPartitionId,
+        ctx.columnParams,
+        ctx.schema,
+        ctx.log,
+        ctx.trainingParams)
     }
   }
 
-  def afterGenerateValidDataset(batchIndex: Int, columnParams: ColumnParams, schema: StructType,
-                                log: Logger, trainParams: BaseTrainParams): Unit = {
-    if (trainParams.delegate.isDefined) {
-      trainParams.delegate.get.afterGenerateValidDataset(batchIndex, TaskContext.getPartitionId, columnParams,
-        schema, log, trainParams)
+  def beforeGenerateValidDataset(ctx: TrainingContext): Unit = {
+    if (ctx.trainingParams.delegate.isDefined) {
+      ctx.trainingParams.delegate.get.beforeGenerateValidDataset(
+        ctx.batchIndex,
+        TaskContext.getPartitionId,
+        ctx.columnParams,
+        ctx.schema,
+        ctx.log,
+        ctx.trainingParams)
     }
   }
 
-  private def findOpenPort(defaultListenPort: Int, numTasksPerExec: Int, log: Logger): Socket = {
-    val basePort = defaultListenPort + (LightGBMUtils.getWorkerId * numTasksPerExec)
+  def afterGenerateValidDataset(ctx: TrainingContext): Unit = {
+    if (ctx.trainingParams.delegate.isDefined) {
+      ctx.trainingParams.delegate.get.afterGenerateValidDataset(
+        ctx.batchIndex,
+        TaskContext.getPartitionId,
+        ctx.columnParams,
+        ctx.schema,
+        ctx.log,
+        ctx.trainingParams)
+    }
+  }
+
+  private def findOpenPort(ctx: TrainingContext): Option[Socket] = {
+    val defaultListenPort: Int = ctx.networkParams.defaultListenPort
+    val log = ctx.log
+    val basePort = defaultListenPort + (LightGBMUtils.getWorkerId * ctx.numTasksPerExecutor)
     if (basePort > LightGBMConstants.MaxPort) {
       throw new Exception(s"Error: port $basePort out of range, possibly due to too many executors or unknown error")
     }
     var localListenPort = basePort
-    var foundPort = false
-    var taskServerSocket: Socket = null
-    while (!foundPort) {
+    var taskServerSocket: Option[Socket] = None
+    def findPort(): Unit = {
       try {
-        taskServerSocket = new Socket()
-        taskServerSocket.bind(new InetSocketAddress(localListenPort))
-        foundPort = true
+        taskServerSocket = Option(new Socket())
+        taskServerSocket.get.bind(new InetSocketAddress(localListenPort))
       } catch {
         case _: IOException =>
           log.warn(s"Could not bind to port $localListenPort...")
@@ -215,8 +277,10 @@ private object TrainUtils extends Serializable {
           if (localListenPort - basePort > 1000) {
             throw new Exception("Error: Could not find open port after 1k tries")
           }
+        findPort()
       }
     }
+    findPort()
     log.info(s"Successfully bound to port $localListenPort")
     taskServerSocket
   }
@@ -236,7 +300,8 @@ private object TrainUtils extends Serializable {
   }
 
   def getNetworkInitNodes(networkParams: NetworkParams,
-                          localListenPort: Int, log: Logger,
+                          localListenPort: Int,
+                          log: Logger,
                           ignoreTask: Boolean): String = {
     using(new Socket(networkParams.addr, networkParams.port)) {
       driverSocket =>
@@ -326,21 +391,19 @@ private object TrainUtils extends Serializable {
     * race conditions in case other applications open sockets on cluster, but usually this
     * should not be a problem
     *
-    * @param networkParams The network parameters.
-    * @param numTasksPerExec The number of tasks per executor.
-    * @param log The logger.
+    * @param ctx Information about the current training session.
     * @param isEnabledWorker True if the current worker is enabled, including whether the partition
     *                        was enabled and this is the chosen worker to initialize the network connection.
     * @return A tuple containing the string with all nodes and the current worker's open socket connection.
     */
-  def getNetworkInfo(networkParams: NetworkParams, numTasksPerExec: Int,
-                     log: Logger, isEnabledWorker: Boolean): (String, Int) = {
-    using(findOpenPort(networkParams.defaultListenPort, numTasksPerExec, log)) {
+  def getNetworkInfo(ctx: TrainingContext, isEnabledWorker: Boolean): (String, Int) = {
+    val networkParams = ctx.networkParams
+    using(findOpenPort(ctx).get) {
       openPort =>
         val localListenPort = openPort.getLocalPort
-        log.info(s"LightGBM task connecting to host: ${networkParams.addr} and port: ${networkParams.port}")
+        ctx.log.info(s"LightGBM task connecting to host: ${networkParams.addr} and port: ${networkParams.port}")
         FaultToleranceUtils.retryWithTimeout() {
-          (getNetworkInitNodes(networkParams, localListenPort, log, !isEnabledWorker), localListenPort)
+          (getNetworkInitNodes(networkParams, localListenPort, ctx.log, !isEnabledWorker), localListenPort)
         }
     }.get
   }
@@ -355,12 +418,14 @@ private object TrainUtils extends Serializable {
     * @param localListenPort The local port used to setup the network ring of communication.
     * @return Boolean representing whether the current task will return the booster or not.
     */
-  def getReturnBooster(isEnabledWorker: Boolean, nodes: String, log: Logger,
-                       numTasksPerExec: Int, localListenPort: Int): Boolean = {
+  def getShouldReturnBooster(ctx: TrainingContext,
+                             isEnabledWorker: Boolean,
+                             nodes: String,
+                             localListenPort: Int): Boolean = {
     if (!isEnabledWorker) {
       false
     } else {
-      val mainWorkerPort = getMainWorkerPort(nodes, log)
+      val mainWorkerPort = getMainWorkerPort(nodes, ctx.log)
       mainWorkerPort == localListenPort
     }
   }

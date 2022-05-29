@@ -5,7 +5,10 @@ package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
 import com.microsoft.azure.synapse.ml.lightgbm.params.{
-  ClassifierTrainParams, LightGBMModelParams, LightGBMPredictionParams, BaseTrainParams}
+  BaseTrainParams,
+  ClassifierTrainParams,
+  LightGBMModelParams,
+  LightGBMPredictionParams}
 import com.microsoft.azure.synapse.ml.logging.BasicLogging
 import org.apache.spark.ml.classification.{ProbabilisticClassificationModel, ProbabilisticClassifier}
 import org.apache.spark.ml.linalg.{Vector, Vectors}
@@ -14,6 +17,7 @@ import org.apache.spark.ml.util._
 import org.apache.spark.ml.{ComplexParamsReadable, ComplexParamsWritable}
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions.{col, udf}
+import org.apache.spark.sql.types.StructField
 
 object LightGBMClassifier extends DefaultParamsReadable[LightGBMClassifier]
 
@@ -39,24 +43,33 @@ class LightGBMClassifier(override val uid: String)
   def getIsUnbalance: Boolean = $(isUnbalance)
   def setIsUnbalance(value: Boolean): this.type = set(isUnbalance, value)
 
-  def getTrainParams(numTasks: Int,  dataset: Dataset[_], numTasksPerExec: Int): BaseTrainParams = {
-    /* The native code for getting numClasses is always 1 unless it is multiclass-classification problem
-     * so we infer the actual numClasses from the dataset here
-     */
+  def getTrainParams(numTasks: Int,
+                     featuresSchema: StructField,
+                     numTasksPerExec: Int): BaseTrainParams = {
     ClassifierTrainParams(
       get(passThroughArgs),
       getIsUnbalance,
-      getNumClasses(dataset),
       getBoostFromAverage,
       get(isProvideTrainingMetric),
       getDelegate,
-      getGeneralParams(numTasks, dataset),
+      getGeneralParams(numTasks, featuresSchema),
       getDatasetParams,
       getDartParams,
       getExecutionParams(numTasksPerExec),
       getObjectiveParams,
       getSeedParams,
       getCategoricalParams)
+  }
+
+  override protected def calculateCustomTrainParams(params: BaseTrainParams, dataset: Dataset[_]): Unit = {
+    /* The native code for getting numClasses is always 1 unless it is multiclass-classification problem
+     * so we infer the actual numClasses from the dataset here.  Since this is a full pass over
+     * the data, explicitly call it out as a calculation and only do it if needed.
+     */
+    val classifierParams = params.asInstanceOf[ClassifierTrainParams]
+    if (classifierParams.isMulti) {
+      classifierParams.numClass = getNumClasses(dataset)
+    }
   }
 
   def getModel(trainParams: BaseTrainParams, lightGBMBooster: LightGBMBooster): LightGBMClassificationModel = {

@@ -31,6 +31,12 @@ object LightGBMConstants {
   /** Multiclass classification objective
     */
   val MulticlassObjective: String = "multiclass"
+  /** Streaming execution mode.
+    */
+  val StreamingExecutionMode: String = "streaming"
+  /** Bulk execution mode.
+    */
+  val BulkExecutionMode: String = "bulk"
   /** Enabled task, used to indicate task that creates lightgbm dataset and runs training.
     */
   val EnabledTask: String = "enabledTask"
