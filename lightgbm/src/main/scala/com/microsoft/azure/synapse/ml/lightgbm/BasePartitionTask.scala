@@ -18,27 +18,64 @@ import scala.language.existentials
   * Note tha only bulk uses these properties, but BasePartitionTask uses this class for consistent interfaces.
   */
 case class PartitionDataState(aggregatedTrainingData: Option[BaseAggregatedColumns],
-                              aggregatedValidationData: Option[BaseAggregatedColumns])
+                              aggregatedValidationData: Option[BaseAggregatedColumns],
+                              streamingValidationSet: Option[LightGBMDataset] = None)
+
+/**
+  * Object to encapsulate all training state on a single partition, plus the actual Booster
+  */
+case class PartitionTaskTrainingState(ctx: TrainingContext,
+                                      partitionId: Int,
+                                      booster: LightGBMBooster) {
+  val log = ctx.log
+
+  val evalNames = booster.getEvalNames()
+  val evalCounts = evalNames.length
+  val bestScore = new Array[Double](evalCounts)
+  val bestScores = new Array[Array[Double]](evalCounts)
+  val bestIter = new Array[Int](evalCounts)
+
+  var iteration: Int = 0
+  var isFinished: Boolean = false
+  var learningRate: Double = ctx.trainingParams.generalParams.learningRate
+  var bestIterResult: Option[Int] = None
+}
 
 /**
   * Class for handling the execution of Tasks on workers for each partition.
   * Should not contain driver-related threads.
   */
 abstract class BasePartitionTask {
-  /* Prepare any data objects for this particular partition.
-   */
-  def preparePartitionDatasets(ctx: TrainingContext, inputRows: Iterator[Row]): PartitionDataState
+  /**
+    * Prepare any data objects for this particular partition.  Implement for specific execution modes.
+    * @param ctx The training context.
+    * @param inputRows The Spark rows for a partition as an iterator.
+    * @param partitionId The partition id.
+    * @return Any intermediate data state (used mainly by bulk execution mode) to pass to future stages.
+    */
+  def preparePartitionData(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState
 
-  /* Generate the final dataset for this task.  Override for specific execution types.
-   */
+  /**
+    * Generate the final dataset for this task.  Internal implementation for specific execution modes.
+    * @param ctx The training context.
+    * @param dataState Any intermediate data state (used mainly by bulk execution mode).
+    * @param forValidation Whether to generate the final training dataset or the validation dataset.
+    * @param referenceDataset A reference dataset to start with (used mainly for validation dataset).
+    */
   protected def generateFinalDatasetInternal(ctx: TrainingContext,
                                              dataState: PartitionDataState,
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset
 
-  /* Generate the final dataset for this task.  This should only be run be tasks that will participate in
-   * the training rounds, i.e. in useSingleDataset mode it will only be 1 task/executor.
-   */
+  /**
+    * Generate the final dataset for this task.  This should only be run be tasks that will participate in
+    * the training rounds, i.e. in useSingleDataset mode it will only be 1 task/executor.
+    * @param ctx The training context.
+    * @param dataState Any intermediate data state (used mainly by bulk execution mode).
+    * @param forValidation Whether to generate the final training dataset or the validation dataset.
+    * @param referenceDataset A reference dataset to start with (used mainly for validation dataset).
+    * @return LightGBM dataset Java wrapper.
+    */
   private def generateFinalDataset(ctx: TrainingContext,
                                    dataState: PartitionDataState,
                                    forValidation: Boolean,
@@ -50,6 +87,16 @@ abstract class BasePartitionTask {
     dataset
   }
 
+  /**
+    * Load a data partition into Datasets and execute LightGBM training iterations.
+    * Note that this method should only be called for "active" threads that created a final Dataset, and not
+    * for ones that were empty or were only used to load temporary Datasets that were merged into a centralized one.
+    * @param ctx The training context.
+    * @param dataState Any intermediate data state (used mainly by bulk execution mode).
+    * @param shouldReturnBooster Whether to return the booster or an empty iterator.
+    * @return LightGBM booster iterator (to comply with Spark mapPartition API), that is either empty or
+    *         has the resulting booster as the only element.
+    */
   private def loadDatasetAndTrain(ctx: TrainingContext,
                                   dataState: PartitionDataState,
                                   shouldReturnBooster: Boolean): Iterator[LightGBMBooster] = {
@@ -58,12 +105,13 @@ abstract class BasePartitionTask {
     try {
       afterGenerateTrainDataset(ctx)
 
-      val validDatasetOpt: Option[LightGBMDataset] = dataState.aggregatedValidationData.map { _ =>
-        beforeGenerateValidDataset(ctx)
-        val out = generateFinalDataset(ctx, dataState, true, Some(trainDataset))
-        afterGenerateValidDataset(ctx)
-        out
-      }
+      val validDatasetOpt: Option[LightGBMDataset] = if (!ctx.hasValid) None
+       else {
+          beforeGenerateValidDataset(ctx)
+          val out = generateFinalDataset(ctx, dataState, true, Some(trainDataset))
+          afterGenerateValidDataset(ctx)
+          Option(out)
+        }
 
       try {
         val state = PartitionTaskTrainingState(
@@ -93,11 +141,19 @@ abstract class BasePartitionTask {
     }
   }
 
-  def handlePartitionTask(ctx: TrainingContext)(inputRows: Iterator[Row]): Iterator[LightGBMBooster] = {
+  /**
+    * This method will be passed to Spark's mapPartition method and handle execution of training on the workers.
+    * @param ctx The training context.
+    * @param inputRows The Spark rows as an iterator.
+    * @return LightGBM booster iterator (to comply with Spark mapPartition API), that is either empty or
+    *         has the resulting booster as the only element.
+    */
+  def mapPartitionTask(ctx: TrainingContext)(inputRows: Iterator[Row]): Iterator[LightGBMBooster] = {
     val log = ctx.log
     val trainParams = ctx.trainingParams
+    val partitionId = getPartitionId
     if (trainParams.generalParams.verbosity > 1) {
-      log.info(s"LightGBM partition $getPartitionId running on executor $getExecutorId")
+      log.info(s"LightGBM partition $partitionId running on executor $getExecutorId")
     }
     val emptyPartition = !inputRows.hasNext
     // Note: the first valid worker with non-empty partitions sets the main executor worker, other workers read it
@@ -113,7 +169,7 @@ abstract class BasePartitionTask {
       List[LightGBMBooster]().toIterator
     } else {
       updateHelperStartSignal(ctx, isEnabledWorker, localListenPort)
-      val dataState = preparePartitionDatasets(ctx, inputRows)
+      val dataState = preparePartitionData(ctx, inputRows, partitionId)
 
       // Return booster only from main worker to reduce network communication overhead
       val shouldReturnBooster = getShouldReturnBooster(ctx, isEnabledWorker, nodes, localListenPort)
@@ -180,8 +236,7 @@ abstract class BasePartitionTask {
 
   /** Determines if the current task is the main worker in the current JVM.
     *
-    * @param log The logger.
-    * @param sharedState The shared state.
+    * @param ctx The training context.
     * @return True if the current task in the main worker, false otherwise.
     */
   private def isCurrentTaskMainWorker(ctx: TrainingContext): Boolean = {

@@ -3,7 +3,7 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm.swig
 
-import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_long, SWIGTYPE_p_p_double, SWIGTYPE_p_p_int, SWIGTYPE_p_unsigned_char, doubleChunkedArray, floatChunkedArray, int32ChunkedArray, lightgbmlib}
+import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_long, SWIGTYPE_p_p_double, SWIGTYPE_p_p_int, SWIGTYPE_p_p_void, SWIGTYPE_p_unsigned_char, SWIGTYPE_p_void, doubleChunkedArray, floatChunkedArray, int32ChunkedArray, lightgbmlib}
 
 object SwigUtils extends Serializable {
   /** Converts a Java float array to a native C++ array using SWIG.
@@ -168,6 +168,19 @@ class IntSwigArray(val array: SWIGTYPE_p_int) extends BaseSwigArray[Int] {
   def delete(): Unit = lightgbmlib.delete_intArray(array)
 }
 
+// Wraps void**
+class VoidPointerSwigArray(val array: SWIGTYPE_p_p_void, val size: Int) extends BaseSwigArray[SWIGTYPE_p_void] {
+  def this(size: Int) = this(lightgbmlib.new_voidPtrArray(size), size)
+
+  def setItem(index: Long, item: SWIGTYPE_p_void): Unit = {
+    lightgbmlib.voidPtrArray_setitem(array, index, item) // set native pointer value
+  }
+
+  def delete(): Unit =  {
+    lightgbmlib.delete_voidPtrArray(array)
+  }
+}
+
 // Wraps double**, which is implemented in the wrapper as an array of DoubleSwigArray
 class DoublePointerSwigArray(val array: SWIGTYPE_p_p_double, val size: Int) extends BaseSwigArray[DoubleSwigArray] {
   val columnVectors: Array[Option[DoubleSwigArray]] = new Array[Option[DoubleSwigArray]](size)
@@ -191,7 +204,7 @@ class DoublePointerSwigArray(val array: SWIGTYPE_p_p_double, val size: Int) exte
   }
 }
 
-// Wraps double**, which is implemented in the wrapper as an array of DoubleSwigArray
+// Wraps int**, which is implemented in the wrapper as an array of IntSwigArray
 class IntPointerSwigArray(val array: SWIGTYPE_p_p_int, val size: Int) extends BaseSwigArray[IntSwigArray] {
   val columnVectors: Array[Option[IntSwigArray]] = new Array[Option[IntSwigArray]](size)
 

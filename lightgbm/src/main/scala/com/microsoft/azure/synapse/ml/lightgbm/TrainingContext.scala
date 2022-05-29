@@ -26,6 +26,9 @@ case class ColumnParams(labelColumn: String,
 case class TrainingContext(batchIndex: Int,
                            sharedStateSingleton: SharedSingleton[SharedState],
                            schema: StructType,
+                           numCols: Int,
+                           numInitScoreClasses: Int,
+                           microBatchSize: Int,
                            trainingParams: BaseTrainParams,
                            networkParams: NetworkParams,
                            columnParams: ColumnParams,
@@ -35,8 +38,7 @@ case class TrainingContext(batchIndex: Int,
                            validationData: Option[Broadcast[Array[Row]]],
                            serializedReferenceDataset: Option[Broadcast[Array[Byte]]],
                            partitionCounts: Option[Array[Long]],
-                           log: Logger,
-                           var initialLearningRate: Double) {
+                           log: Logger) {
   val isProvideTrainingMetric: Boolean = { trainingParams.isProvideTrainingMetric.getOrElse(false) }
   val improvementTolerance: Double = { trainingParams.generalParams.improvementTolerance }
   val earlyStoppingRound: Int = { trainingParams.generalParams.earlyStoppingRound }
@@ -47,11 +49,12 @@ case class TrainingContext(batchIndex: Int,
 
   val hasValid = validationData.isDefined
 
-  val isStreaming: Boolean = { trainingParams.generalParams.?? }
+  val isStreaming: Boolean = trainingParams.executionParams.executionMode == LightGBMConstants.StreamingExecutionMode
 
-  val hasWeights: Boolean = { trainingParams.generalParams.?? }
-  val hasInitialScores: Boolean = { trainingParams.generalParams.?? }
-  val hasGroups: Boolean = { trainingParams.generalParams.?? }
+  val hasWeights: Boolean = { columnParams.weightColumn.isDefined && columnParams.weightColumn.get.nonEmpty }
+  val hasInitialScores: Boolean = { columnParams.initScoreColumn.isDefined &&
+                                    columnParams.initScoreColumn.get.nonEmpty }
+  val hasGroups: Boolean = { columnParams.groupColumn.isDefined && columnParams.groupColumn.get.nonEmpty }
 
   val sharedState = sharedStateSingleton.get
 
