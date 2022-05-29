@@ -21,7 +21,7 @@ class SharedDatasetState(columnParams: ColumnParams,
   val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
   val matrixType: String = trainParams.executionParams.matrixType
 
-  private val streamingPartitionDatasets = scala.collection.mutable.Map[Int, List[LightGBMDataset]]()
+  private lazy val streamingPartitionDatasets = scala.collection.mutable.Map[Int, List[LightGBMDataset]]()
 
   lazy val denseAggregatedColumns: BaseDenseAggregatedColumns = new DenseSyncAggregatedColumns(chunkSize)
 

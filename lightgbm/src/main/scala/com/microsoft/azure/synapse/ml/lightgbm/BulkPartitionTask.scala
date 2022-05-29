@@ -13,7 +13,7 @@ import scala.language.existentials
   */
 class BulkPartitionTask extends BasePartitionTask {
 
-  def preparePartitionDatasets(ctx: TrainingContext, inputRows: Iterator[Row]): PartitionDataState = {
+  def preparePartitionData(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState = {
     val aggregatedColumns = {
       val prepAggregatedColumns: BaseChunkedColumns = ctx.sharedState.datasetState.prepBulk(inputRows)
       ctx.sharedState.datasetState.mergeBulk(prepAggregatedColumns)

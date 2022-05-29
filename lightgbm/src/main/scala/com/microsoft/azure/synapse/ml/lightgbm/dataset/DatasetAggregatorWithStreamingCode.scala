@@ -14,7 +14,6 @@ import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.StructType
 
 import java.util.concurrent.atomic.AtomicLong
-import scala.annotation.tailrec
 import scala.collection.mutable.ListBuffer
 import scala.collection.concurrent.TrieMap
 
@@ -39,52 +38,6 @@ private[lightgbm] object ChunkedArrayUtils {
     for (lastChunkIdx <- 0L until lastChunkCount) {
       mainArray.setItem(threadRowStartIndex + chunkCount * chunkSize + lastChunkIdx,
         chunkedArray.getItem(chunkCount, lastChunkIdx, defaultVal))
-    }
-  }
-
-  def insertTransposedChunkedArray[T: Numeric](chunkedArray: ChunkedArray[T],
-                                               numCols: Int,
-                                               mainArray: BaseSwigArray[T],
-                                               numTargetRows: Long,
-                                               startIndex: Long): Unit = {
-    val num = implicitly[Numeric[T]]
-    val defaultVal = num.fromInt(-1)
-
-    @tailrec
-    def copyChunk(chunk: Int, chunkSize: Long, inChunkIdx: Long, sourceIndex: Long): Long = {
-      val sourceRow = sourceIndex / numCols
-      val col = sourceIndex % numCols
-      val targetIndex = startIndex + sourceRow + col * numTargetRows
-      val value = chunkedArray.getItem(chunk, inChunkIdx, defaultVal)
-      mainArray.setItem(targetIndex, value)
-      val newSourceIndex = sourceIndex + 1
-      val newInChunkIndex = inChunkIdx + 1
-      if (newInChunkIndex < chunkSize) copyChunk(chunk, chunkSize, newInChunkIndex, newSourceIndex)
-      else newSourceIndex
-    }
-
-    @tailrec
-    def copyChunkSet(maxChunk: Int, chunkSize: Long, chunk: Int, sourceIndex: Long): Long = {
-      val currentSourceIndex = copyChunk(chunk, chunkSize, 0, sourceIndex)
-      val newChunk = chunk + 1
-      if (newChunk < maxChunk) copyChunkSet(maxChunk, chunkSize, newChunk, currentSourceIndex)
-      else currentSourceIndex
-    }
-
-    val fullChunkSize = chunkedArray.getChunkSize
-    val allChunkCount = chunkedArray.getChunksCount.toInt
-    val fullChunkCount = allChunkCount - 1
-    val lastChunkSize = chunkedArray.getLastChunkAddCount
-
-    // First transpose full chunks
-    val intermediateSourceIndex = if (allChunkCount == 1) 0
-      else copyChunkSet(fullChunkCount, fullChunkSize, 0, 0)
-    // Next transpose filled values from last chunk only
-    val finalSourceIndex = copyChunkSet(allChunkCount, lastChunkSize, fullChunkCount, intermediateSourceIndex)
-
-    // We should have no remainder left over
-    if ((finalSourceIndex % numCols) != 0) {
-      throw new Exception(s"transpose did not have whole number of columns. numCols: $numCols")
     }
   }
 }
@@ -163,7 +116,7 @@ private[lightgbm] abstract class BaseChunkedColumns(rowsIter: PeekingIterator[Ro
 
   def release(): Unit = {
     // Clear memory
-    Option(labels).foreach(_.delete())
+    labels.delete()
     weights.foreach(_.delete())
     initScores.foreach(_.delete())
   }
@@ -204,9 +157,9 @@ private[lightgbm] final class SparseChunkedColumns(rowsIter: PeekingIterator[Row
   override def release(): Unit = {
     // Clear memory
     super.release()
-    Option(indexes).foreach(_.delete())
-    Option(values).foreach(_.delete())
-    Option(indexPointers).foreach(_.delete())
+    indexes.delete()
+    values.delete()
+    indexPointers.delete()
   }
 }
 
@@ -225,7 +178,7 @@ private[lightgbm] final class DenseChunkedColumns(rowsIter: PeekingIterator[Row]
   override def release(): Unit = {
     // Clear memory
     super.release()
-    Option(features).foreach(_.delete())
+    features.delete()
   }
 
 }
@@ -242,12 +195,11 @@ private[lightgbm] abstract class BaseAggregatedColumns(val chunkSize: Int) exten
   protected val rowCount = new AtomicLong(0L)
   protected val initScoreCount = new AtomicLong(0L)
   protected val pIdToRowCountOffset = new TrieMap[Long, Long]()
+  protected val pIdToInitScoreCountOffset = new TrieMap[Long, Long]()
 
   protected var numCols = 0
 
   def getRowCount: Int = rowCount.get().toInt
-
-  def getInitScoreCount: Int = initScoreCount.get().toInt
 
   def getNumCols: Int = numCols
 
@@ -258,48 +210,49 @@ private[lightgbm] abstract class BaseAggregatedColumns(val chunkSize: Int) exten
   def getGroups: Array[Any] = groups
 
   def cleanup(): Unit = {
-    Option(labels).foreach(_.delete())
+    labels.delete()
     weights.foreach(_.delete())
     initScores.foreach(_.delete())
   }
 
-  def generateDataset(referenceDataset: Option[LightGBMDataset], datasetParams: String): LightGBMDataset
+  // Get sample count and indices. Note that we use LGMB utilities so
+  // that the same configuration of sampling is used every time (e.g. size, random seed)
+  def createSampledIndices(datasetParams: String): (Int, IntSwigArray) =
+  {
+    val numSamplesOut = lightgbmlib.new_intp()
+    LightGBMUtils.validate(lightgbmlib.LGBM_GetSampleCount(
+      getRowCount,
+      datasetParams,
+      numSamplesOut), "Get sample count")
+    val numSamples = lightgbmlib.intp_value(numSamplesOut)
+    lightgbmlib.delete_intp(numSamplesOut)
+
+    val randomIndices = new IntSwigArray(numSamples)
+    val numActualSamplesOut = lightgbmlib.new_intp()
+    LightGBMUtils.validate(lightgbmlib.LGBM_SampleIndices(
+      numSamples,
+      datasetParams,
+      lightgbmlib.int_to_voidp_ptr(randomIndices.array),
+      numActualSamplesOut), "Get sample indices")
+    val numActualSamples = lightgbmlib.intp_value(numActualSamplesOut)
+    lightgbmlib.delete_intp(numActualSamplesOut)
+
+    (numActualSamples, randomIndices)
+  }
+
+  def generateDataset(referenceDataset: Option[LightGBMDataset],
+                      datasetParams: String): LightGBMDataset
 
   def incrementCount(chunkedCols: BaseChunkedColumns): Unit = {
     rowCount.addAndGet(chunkedCols.rowCount)
     pIdToRowCountOffset.update(LightGBMUtils.getPartitionId, chunkedCols.rowCount)
     initScoreCount.addAndGet(chunkedCols.numInitScores)
+    pIdToInitScoreCountOffset.update(
+      LightGBMUtils.getPartitionId, chunkedCols.numInitScores)
   }
 
   def addRows(chunkedCols: BaseChunkedColumns): Unit = {
     numCols = getNumColsFromChunkedArray(chunkedCols)
-  }
-
-  def addMetadataToDataset(dataset: LightGBMDataset): Unit = {
-    dataset.addFloatField(labels.array, "label", getRowCount)
-    weights.map(_.array).foreach(dataset.addFloatField(_, "weight", getRowCount))
-    initScores.map(_.array).foreach(dataset.addDoubleField(_, "init_score", getInitScoreCount))
-  }
-
-  /**
-    * LightGBM expects initial scores to be column-based, but the chunks load them as rows.
-    * We need to to transpose the values before sending.
-    * @param chunkedCols Source ChunkedColumns to add from
-    * @param startIndex Start index of insertion
-    */
-  def addInitialScores(chunkedCols: BaseChunkedColumns, startIndex: Long): Unit = {
-    // Optimize for single class, which does not need transposing
-    chunkedCols.initScores.foreach(chunkedArray => if (getRowCount == getInitScoreCount)
-      chunkedArray.coalesceTo(initScores.get)
-    else {
-      log.info(s"DEBUG: cols: ${getInitScoreCount/getRowCount} rows: $getRowCount, startIndex: $startIndex")
-      ChunkedArrayUtils.insertTransposedChunkedArray(
-        chunkedArray,
-        getInitScoreCount/getRowCount,
-        initScores.get,
-        getRowCount,
-        startIndex)
-    })
   }
 
   protected def initializeRows(chunkedCols: BaseChunkedColumns): Unit = {
@@ -312,6 +265,7 @@ private[lightgbm] abstract class BaseAggregatedColumns(val chunkSize: Int) exten
     initializeFeatures(chunkedCols, rc)
     groups = new Array[Any](rc.toInt)
     updateConcurrentMapOffsets(pIdToRowCountOffset)
+    updateConcurrentMapOffsets(pIdToInitScoreCountOffset)
   }
 
   protected def updateConcurrentMapOffsets(concurrentIdToOffset: TrieMap[Long, Long],
@@ -337,7 +291,7 @@ private[lightgbm] trait DisjointAggregatedColumns extends BaseAggregatedColumns 
     // Coalesce to main arrays passed to dataset create
     chunkedCols.labels.coalesceTo(labels)
     chunkedCols.weights.foreach(_.coalesceTo(weights.get))
-    addInitialScores(chunkedCols, 0)
+    chunkedCols.initScores.foreach(_.coalesceTo(initScores.get))
     this.addFeatures(chunkedCols)
     chunkedCols.groups.copyToArray(groups)
   }
@@ -370,10 +324,12 @@ private[lightgbm] trait SyncAggregatedColumns extends BaseAggregatedColumns {
   private def parallelizedCopy(chunkedCols: BaseChunkedColumns): Unit = {
     // Parallelized copy to common arrays
     var threadRowStartIndex = 0L
+    var threadInitScoreStartIndex = 0L
     val featureIndexes =
       this.synchronized {
         val partitionId = LightGBMUtils.getPartitionId
-        threadRowStartIndex = pIdToRowCountOffset(partitionId)
+        threadRowStartIndex = pIdToRowCountOffset.get(partitionId).get
+        threadInitScoreStartIndex = chunkedCols.initScores.map(_ => pIdToInitScoreCountOffset(partitionId)).getOrElse(0)
         updateThreadLocalIndices(chunkedCols, threadRowStartIndex)
       }
     ChunkedArrayUtils.copyChunkedArray(chunkedCols.labels, labels, threadRowStartIndex)
@@ -381,7 +337,11 @@ private[lightgbm] trait SyncAggregatedColumns extends BaseAggregatedColumns {
       weightChunkedArray =>
         ChunkedArrayUtils.copyChunkedArray(weightChunkedArray, weights.get, threadRowStartIndex)
     }
-    addInitialScores(chunkedCols, threadRowStartIndex)
+    chunkedCols.initScores.foreach {
+      initScoreChunkedArray =>
+        ChunkedArrayUtils.copyChunkedArray(initScoreChunkedArray, initScores.get,
+          threadInitScoreStartIndex)
+    }
     parallelizeFeaturesCopy(chunkedCols, featureIndexes)
     chunkedCols.groups.copyToArray(groups, threadRowStartIndex.toInt)
     // rewrite array reference for volatile arrays, see: https://www.javamex.com/tutorials/volatile_arrays.shtml
@@ -404,8 +364,74 @@ private[lightgbm] abstract class BaseDenseAggregatedColumns(chunkSize: Int) exte
 
   def getFeatures: DoubleSwigArray = features
 
+  // Determine whether we are streaming (requires sample data) or bulk
   def generateDataset(referenceDataset: Option[LightGBMDataset],
                       datasetParams: String): LightGBMDataset = {
+    val useStreaming = true
+    if (useStreaming) generateDenseDatasetByStreaming(createSampledData(datasetParams), datasetParams)
+    else generateDenseDatasetByBulk(referenceDataset, datasetParams)
+  }
+
+  // Calculate sample data from this aggregated data set.
+  def createSampledData(datasetParams: String): SampledData =
+  {
+    val (numActualSamples, randomIndices) = createSampledIndices(datasetParams)
+
+    val sampledData = new SampledData(numActualSamples, numCols)
+    (0 until numActualSamples).foreach(i => {
+      (0 until numCols).foreach(col => {
+        val value = features.getItem(randomIndices.getItem(i) * numCols + col)
+        sampledData.pushRowElementIfNotZero(col, value)
+      })
+    })
+    sampledData
+  }
+
+  def generateDenseDatasetByStreaming(sampleData: SampledData,
+                                      datasetParams: String): LightGBMDataset = {
+    val pointer = lightgbmlib.voidpp_handle()
+    try {
+      val totalNumRows = rowCount.get().toInt
+
+      logInfo(s"LightGBM task generating schema for empty dense dataset with $totalNumRows rows and $numCols columns")
+      // Generate the dataset for features
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSampledColumn(
+        sampleData.getSampleData(),
+        sampleData.getSampleIndices(),
+        numCols,
+        sampleData.getRowCounts(),
+        sampleData.numRows,
+        totalNumRows,
+        datasetParams,
+        pointer), "Dataset create")
+
+      // Push rows 1 by 1 by copying each row into same memory array
+      val rowData = new DoubleSwigArray(numCols)
+      val datasetPointer = lightgbmlib.voidpp_value(pointer)
+      val rowDataPointer = lightgbmlib.double_to_voidp_ptr(rowData.array)
+      (0 until totalNumRows).foreach(i => {
+        (0 until numCols).foreach(j => rowData.setItem(j, features.getItem(i * numCols + j)))
+        LightGBMUtils.validate(lightgbmlib.LGBM_DatasetPushRowBatch(
+          datasetPointer,
+          rowDataPointer,
+          lightgbmlibConstants.C_API_DTYPE_FLOAT64,
+          1,
+          numCols,
+          i,
+          0), "Dataset push row")
+      })
+    } finally {
+      lightgbmlib.delete_doubleArray(features.array)
+    }
+    val dataset = new LightGBMDataset(lightgbmlib.voidpp_value(pointer))
+    dataset.addFloatField(labels.array, "label", getRowCount)
+    weights.map(_.array).foreach(dataset.addFloatField(_, "weight", getRowCount))
+    initScores.map(_.array).foreach(dataset.addDoubleField(_, "init_score", getRowCount))
+    dataset
+  }
+
+  def generateDenseDatasetByBulk(referenceDataset: Option[LightGBMDataset],
+                            datasetParams: String): LightGBMDataset = {
     val pointer = lightgbmlib.voidpp_handle()
     try {
       val numRows = rowCount.get().toInt
@@ -424,12 +450,12 @@ private[lightgbm] abstract class BaseDenseAggregatedColumns(chunkSize: Int) exte
       lightgbmlib.delete_doubleArray(features.array)
     }
     val dataset = new LightGBMDataset(lightgbmlib.voidpp_value(pointer))
-    addMetadataToDataset(dataset)
+    dataset.addFloatField(labels.array, "label", getRowCount)
+    weights.map(_.array).foreach(dataset.addFloatField(_, "weight", getRowCount))
+    initScores.map(_.array).foreach(dataset.addDoubleField(_, "init_score", getRowCount))
     dataset
   }
-
 }
-
 
 private[lightgbm] final class DenseAggregatedColumns(chunkSize: Int)
   extends BaseDenseAggregatedColumns(chunkSize) with DisjointAggregatedColumns {
@@ -502,12 +528,12 @@ private[lightgbm] abstract class BaseSparseAggregatedColumns(chunkSize: Int)
   def getIndexPointers: IntSwigArray = indexPointers
 
   override def cleanup(): Unit = {
-    Option(labels).foreach(_.delete())
+    labels.delete()
     weights.foreach(_.delete())
     initScores.foreach(_.delete())
-    Option(values).foreach(_.delete())
-    Option(indexes).foreach(_.delete())
-    Option(indexPointers).foreach(_.delete())
+    values.delete()
+    indexes.delete()
+    indexPointers.delete()
   }
 
   private def indexPointerArrayIncrement(indptrArray: SWIGTYPE_p_int): Unit = {
@@ -519,8 +545,69 @@ private[lightgbm] abstract class BaseSparseAggregatedColumns(chunkSize: Int)
     }
   }
 
+  // Determine whether we are streaming (requires sample data) or bulk
   def generateDataset(referenceDataset: Option[LightGBMDataset],
                       datasetParams: String): LightGBMDataset = {
+    val useStreaming = true
+    if (useStreaming) generateSparseDatasetByStreaming(createSampledData(datasetParams), datasetParams)
+    else generateSparseDatasetByBulk(referenceDataset, datasetParams)
+  }
+
+  // Calculate sample data from this aggregated data set.
+  def createSampledData(datasetParams: String): SampledData =
+  {
+    val (numActualSamples, randomIndices) = createSampledIndices(datasetParams)
+
+    val sampledData = new SampledData(numActualSamples, numCols)
+    (0 until numActualSamples).foreach(i => {
+      val randomIndex = randomIndices.getItem(i)
+      val startIndex = indexPointers.getItem(randomIndex)
+      val stopIndex = indexPointers.getItem(randomIndex + 1)
+      (startIndex until stopIndex).foreach(j => {
+        sampledData.pushRowElementIfNotZero(indexes.getItem(j), values.getItem(j))
+      })
+    })
+    sampledData
+  }
+
+  def generateSparseDatasetByStreaming(sampleData: SampledData,
+                                 datasetParams: String): LightGBMDataset = {
+    val pointer = lightgbmlib.voidpp_handle()
+    val totalNumRows = rowCount.get().toInt
+
+    logInfo(s"LightGBM task generating schema for empty dense dataset with $totalNumRows rows and $numCols columns")
+    // Generate the dataset for features
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSampledColumn(
+      sampleData.getSampleData(),
+      sampleData.getSampleIndices(),
+      numCols,
+      sampleData.getRowCounts(),
+      sampleData.numRows,
+      totalNumRows,
+      datasetParams,
+      pointer), "Dataset create")
+
+    // Push all sparse rows as one batch (TODO true streaming by row/microbatch)
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetPushRowBatchByCSR(
+      lightgbmlib.voidpp_value(pointer),
+      lightgbmlib.int_to_voidp_ptr(indexPointers.array),
+      lightgbmlibConstants.C_API_DTYPE_INT32,
+      indexes.array,
+      lightgbmlib.double_to_voidp_ptr(values.array),
+      lightgbmlibConstants.C_API_DTYPE_FLOAT64,
+      indptrCount.get(),
+      indexesCount.get(),
+      0,
+      0), "Dataset push row")
+    val dataset = new LightGBMDataset(lightgbmlib.voidpp_value(pointer))
+    dataset.addFloatField(labels.array, "label", getRowCount)
+    weights.map(_.array).foreach(dataset.addFloatField(_, "weight", getRowCount))
+    initScores.map(_.array).foreach(dataset.addDoubleField(_, "init_score", getRowCount))
+    dataset
+  }
+
+  def generateSparseDatasetByBulk(referenceDataset: Option[LightGBMDataset],
+                                  datasetParams: String): LightGBMDataset = {
     indexPointerArrayIncrement(getIndexPointers.array)
     val pointer = lightgbmlib.voidpp_handle()
     val numRows = indptrCount.get() - 1
@@ -539,9 +626,12 @@ private[lightgbm] abstract class BaseSparseAggregatedColumns(chunkSize: Int)
       referenceDataset.map(_.datasetPtr).orNull,
       pointer), "Dataset create")
     val dataset = new LightGBMDataset(lightgbmlib.voidpp_value(pointer))
-    addMetadataToDataset(dataset)
+    dataset.addFloatField(labels.array, "label", getRowCount)
+    weights.map(_.array).foreach(dataset.addFloatField(_, "weight", getRowCount))
+    initScores.map(_.array).foreach(dataset.addDoubleField(_, "init_score", getRowCount))
     dataset
   }
+
 }
 
 /** Defines class for aggregating rows to a single structure before creating the native LightGBMDataset.
@@ -575,16 +665,15 @@ private[lightgbm] final class SparseSyncAggregatedColumns(chunkSize: Int)
 
   protected def updateThreadLocalIndices(chunkedCols: BaseChunkedColumns, threadRowStartIndex: Long): List[Long] = {
     val partitionId = LightGBMUtils.getPartitionId
-    val threadIndexesStartIndex = pIdToIndexesCountOffset(partitionId)
-    val threadIndPtrStartIndex = pIdToIndptrCountOffset(partitionId)
+    val threadIndexesStartIndex = pIdToIndexesCountOffset.get(partitionId).get
+    val threadIndPtrStartIndex = pIdToIndptrCountOffset.get(partitionId).get
     List(threadIndexesStartIndex, threadIndPtrStartIndex)
   }
 
   protected def parallelizeFeaturesCopy(chunkedCols: BaseChunkedColumns, featureIndexes: List[Long]): Unit = {
     val sparseChunkedCols = chunkedCols.asInstanceOf[SparseChunkedColumns]
-    ChunkedArrayUtils.copyChunkedArray(sparseChunkedCols.indexes, indexes, featureIndexes.head)
-    ChunkedArrayUtils.copyChunkedArray(sparseChunkedCols.values, values, featureIndexes.head)
+    ChunkedArrayUtils.copyChunkedArray(sparseChunkedCols.indexes, indexes, featureIndexes(0))
+    ChunkedArrayUtils.copyChunkedArray(sparseChunkedCols.values, values, featureIndexes(0))
     ChunkedArrayUtils.copyChunkedArray(sparseChunkedCols.indexPointers, indexPointers, featureIndexes(1))
   }
-
 }
