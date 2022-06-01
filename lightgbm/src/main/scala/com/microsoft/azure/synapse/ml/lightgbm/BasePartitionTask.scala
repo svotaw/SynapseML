@@ -45,7 +45,7 @@ case class PartitionTaskTrainingState(ctx: TrainingContext,
   * Class for handling the execution of Tasks on workers for each partition.
   * Should not contain driver-related threads.
   */
-abstract class BasePartitionTask {
+abstract class BasePartitionTask extends Serializable {
   /**
     * Prepare any data objects for this particular partition.  Implement for specific execution modes.
     * @param ctx The training context.

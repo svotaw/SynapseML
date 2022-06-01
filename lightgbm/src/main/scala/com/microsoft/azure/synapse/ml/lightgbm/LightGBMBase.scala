@@ -42,6 +42,8 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * @return The trained model.
     */
   protected def train(allTrainingData: Dataset[_]): TrainedModel = {
+    LightGBMUtils.initializeNativeLibrary()
+
     logTrain({
       getOptGroupCol.foreach(DatasetUtils.validateGroupColumn(_, allTrainingData.schema))
       if (getNumBatches > 0) {
@@ -509,7 +511,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     }
 
     val numInitScoreClasses =
-      if (getInitScoreCol.isEmpty) 0
+      if (get(initScoreCol).isEmpty) 0
       else if (dataframe.schema(getInitScoreCol).dataType == VectorType)
         firstRow.getAs[DenseVector](getInitScoreCol).size
       else 1
@@ -534,30 +536,31 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       .rdd
       .mapPartitionsWithIndex({case (i,rows) => Iterator((i,rows.size.toLong))}, true)
       .collect()
-    val rowCounts = Array[Long](indexedRowCounts.length)
+    val rowCounts: Array[Long] = new Array[Long](indexedRowCounts.size)
     indexedRowCounts.foreach(pair => rowCounts(pair._1) = pair._2)
     val totalNumRows = indexedRowCounts.map(partition => partition._2).sum
 
     // Get sample data using sample() function in Spark
     // TODO optimize with just a take() in case of user approval
     val sampleCount: Int = getBinSampleCount
-    val seed: Int = getSeedParams.dataRandomSeed.get // TODO data or just plain seed?
+    val seed: Int = getSeedParams.dataRandomSeed.getOrElse(42) // TODO data or just plain seed?
     val featureColName = getFeaturesCol
     // TODO what if error causes < sampleCount?  should we add a little buffer and let limit() do the work?
-    val fraction = if (sampleCount > totalNumRows) totalNumRows
+    val fraction = if (sampleCount > totalNumRows) 1.0
                    else Math.min(1.0, (sampleCount.toDouble + 10000)/totalNumRows)
-    val rawSampleData = dataframe.select(dataframe.col(featureColName)).sample(fraction, seed).limit(sampleCount)
+    val numSamples = Math.min(sampleCount, totalNumRows).toInt
+    val rawSampleData = dataframe.select(dataframe.col(featureColName)).sample(fraction, seed).limit(numSamples)
 
     // Make a wrapped object that formats the binary sample data as needed by LightGBM
-    val sampleData = new SampledData(sampleCount, numCols)
-    rawSampleData.foreach(row => sampleData.pushRow(row, featureColName))
+    val sampleData = new SampledData(numSamples, numCols)
+    rawSampleData.collect().foreach(row => sampleData.pushRow(row, featureColName))
 
     // Get reference data set using sampled data
     // Use driver node to run LightGBM in standalone mode
     val datasetParams = getDatasetCreationParams(
       trainingParams.generalParams.categoricalFeatures,
       trainingParams.executionParams.numThreads)
-    val serializedReference = getReferenceDataset(totalNumRows.toInt, numCols, datasetParams, sampleData, log)
+    val serializedReference = createReferenceDataset(totalNumRows.toInt, numCols, datasetParams, sampleData, log)
     (serializedReference, rowCounts)
   }
 
@@ -583,14 +586,15 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
 
     val networkParams = NetworkParams(getDefaultListenPort, inetAddress, port, getUseBarrierExecutionMode)
     val columnParams = getColumnParams
-    val sharedState = SharedSingleton(new SharedState(columnParams, dataframe.schema, trainParams))
+    val schema = dataframe.schema
+    val sharedState = SharedSingleton(new SharedState(columnParams, schema, trainParams))
     val datasetParams = getDatasetCreationParams(
       trainParams.generalParams.categoricalFeatures,
       trainParams.executionParams.numThreads)
 
     val ctx = TrainingContext(batchIndex, // TODO log this context?
       sharedState,
-      dataframe.schema,
+      schema,
       numCols,
       numInitValueClasses,
       1, // TODO where to set this? (microBatchSize)
@@ -602,13 +606,12 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       numTasksPerExecutor,
       validationData,
       serializedReferenceDataset,
-      partitionCounts,
-      log)
+      partitionCounts)
 
     // Create the object that will manage the mapPartitions function
     val workerTaskHandler: BasePartitionTask = if (ctx.isStreaming) new StreamingPartitionTask()
                                                else new BulkPartitionTask()
-    val mapPartitionsFunc = workerTaskHandler.mapPartitionTask(ctx)(_)
+    val mapPartitionsFunc = mapPartitions(ctx, workerTaskHandler)(_)
 
     val encoder = Encoders.kryo[LightGBMBooster]
     val lightGBMBooster =
@@ -620,6 +623,19 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     // Wait for future to complete (should be done by now)
     Await.result(future, Duration(getTimeout, SECONDS))
     getModel(trainParams, lightGBMBooster)
+  }
+
+  /** Method that is executed per worker as part of Spark mapPartitions call. Just sets the
+    * Logger (since it's not serializable) and calls the dedicated worker task class.
+    *
+    * @return Iterator[T], as per Spark API
+    */
+  private def mapPartitions(ctx: TrainingContext,
+                            task: BasePartitionTask)
+                           (inputRows: Iterator[Row]): Iterator[LightGBMBooster] = {
+    // TODO set Logger on BasePartitionTask directly?
+    ctx.setLogger(log) // Logger is not serializable, so set it in the context of the worker
+    task.mapPartitionTask(ctx)(inputRows)
   }
 
   /** Optional group column for Ranking, set to None by default.

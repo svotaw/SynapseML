@@ -123,6 +123,7 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
       .setLabelCol(labelCol)
       .setLeafPredictionCol(leafPredCol)
       .setFeaturesShapCol(featuresShapCol)
+      .setExecutionMode("streaming")
   }
 
   test("Verify LightGBM Classifier can be run with TrainValidationSplit") {

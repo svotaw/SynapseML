@@ -60,14 +60,14 @@ class SampledData(val numRows: Int, val numCols: Int) {
   def pushRow(rowData: Array[Double]): Unit = {
     require(rowData.size <= numCols, s"Row is too large for sample data.  size should be $numCols" +
                                      s", but is ${rowData.size}")
-    (0 to numCols).foreach(col => pushRowElementIfNotZero(col, rowData(col)))
+    (0 until numCols).foreach(col => pushRowElementIfNotZero(col, rowData(col)))
   }
 
   // Store non-zero elements in arrays given a sparse feature value row
   def pushRow(rowData: SparseVector): Unit = {
     require(rowData.size <= numCols, s"Row is too large for sample data.  size should be $numCols" +
                                      s", but is ${rowData.size}")
-    (0 to rowData.numActives).foreach(i => pushRowElementIfNotZero(rowData.indices(i), rowData.values(i)))
+    (0 until rowData.numActives).foreach(i => pushRowElementIfNotZero(rowData.indices(i), rowData.values(i)))
   }
 
   def pushRowElementIfNotZero(col: Int, value: Double): Unit = {

@@ -37,8 +37,9 @@ case class TrainingContext(batchIndex: Int,
                            numTasksPerExecutor: Int,
                            validationData: Option[Broadcast[Array[Row]]],
                            serializedReferenceDataset: Option[Broadcast[Array[Byte]]],
-                           partitionCounts: Option[Array[Long]],
-                           log: Logger) {
+                           partitionCounts: Option[Array[Long]]) extends Serializable {
+  @transient var log: Logger = null
+
   val isProvideTrainingMetric: Boolean = { trainingParams.isProvideTrainingMetric.getOrElse(false) }
   val improvementTolerance: Double = { trainingParams.generalParams.improvementTolerance }
   val earlyStoppingRound: Int = { trainingParams.generalParams.earlyStoppingRound }
@@ -56,8 +57,12 @@ case class TrainingContext(batchIndex: Int,
                                     columnParams.initScoreColumn.get.nonEmpty }
   val hasGroups: Boolean = { columnParams.groupColumn.isDefined && columnParams.groupColumn.get.nonEmpty }
 
-  val sharedState = sharedStateSingleton.get
+  def sharedState(): SharedState = { sharedStateSingleton.get }
 
   def incrementArrayProcessedSignal(): Int = { sharedState.incrementArrayProcessedSignal(log) }
   def incrementDoneSignal(): Unit = { sharedState.incrementDoneSignal(log) }
+
+  def setLogger(logger: Logger): Unit = {
+    log = logger;
+  }
 }
