@@ -74,12 +74,11 @@ private object TrainUtils extends Serializable {
     }
   }
 
-  def getReferenceDataset(numRows: Int,
-                          numCols: Int,
-                          datasetParams: String,
-                          sampleData: SampledData,
-                          log: Logger): Array[Byte] = {
-    LightGBMUtils.initializeNativeLibrary()
+  def createReferenceDataset(numRows: Int,
+                             numCols: Int,
+                             datasetParams: String,
+                             sampleData: SampledData,
+                             log: Logger): Array[Byte] = {
     log.info(s"LightGBM task generating schema for empty dense dataset with $numRows rows and $numCols columns")
     // Generate the dataset for features
     val dataset = lightgbmlib.voidpp_handle()
@@ -89,7 +88,7 @@ private object TrainUtils extends Serializable {
       numCols,
       sampleData.getRowCounts(),
       sampleData.numRows,
-      numRows,
+      numRows, // TODO does this allocate?
       datasetParams,
       dataset), "Dataset create")
 

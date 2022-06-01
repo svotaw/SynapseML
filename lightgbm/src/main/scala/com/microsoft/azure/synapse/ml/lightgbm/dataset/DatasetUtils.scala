@@ -38,6 +38,18 @@ object DatasetUtils {
     groupCardinality
   }
 
+  def getArrayType(rowsIter: Iterator[Row], matrixType: String, featuresColumn: String): (Iterator[Row], Boolean) = {
+    if (matrixType == "auto") {
+      sampleRowsForArrayType(rowsIter, featuresColumn)
+    } else if (matrixType == "sparse") {
+      (rowsIter: Iterator[Row], true)
+    } else if (matrixType == "dense") {
+      (rowsIter: Iterator[Row], false)
+    } else {
+      throw new Exception(s"Invalid parameter matrix type specified: ${matrixType}")
+    }
+  }
+
   /**
     * Sample the first several rows to determine whether to construct sparse or dense matrix in lightgbm native code.
     *
@@ -45,11 +57,11 @@ object DatasetUtils {
     * @param columnParams The column parameters.
     * @return A reconstructed iterator with the same original rows and whether the matrix should be sparse or dense.
     */
-  def sampleRowsForArrayType(rowsIter: Iterator[Row], columnParams: ColumnParams): (Iterator[Row], Boolean) = {
+  def sampleRowsForArrayType(rowsIter: Iterator[Row], featuresColumn: String): (Iterator[Row], Boolean) = {
     val numSampledRows = 10
     val sampleRows = rowsIter.take(numSampledRows).toArray
     val numDense = sampleRows
-      .map(row => row.getAs[Any](columnParams.featuresColumn).isInstanceOf[DenseVector])
+      .map(row => row.getAs[Any](featuresColumn).isInstanceOf[DenseVector])
       .count(value => value)
     val numSparse = sampleRows.length - numDense
     // recreate the iterator

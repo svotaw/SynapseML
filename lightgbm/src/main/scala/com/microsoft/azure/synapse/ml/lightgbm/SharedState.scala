@@ -27,7 +27,8 @@ class SharedDatasetState(columnParams: ColumnParams,
   lazy val sparseAggregatedColumns: BaseSparseAggregatedColumns = new SparseSyncAggregatedColumns(chunkSize)
 
   def prepBulk(iter: Iterator[Row]): BaseChunkedColumns = {
-    val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) = getArrayType(iter, matrixType)
+    val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) =
+      getArrayType(iter, matrixType, columnParams.featuresColumn)
     val peekableIter = new PeekingIterator(concatRowsIter)
     // Note: the first worker gets to officially set "is sparse", other workers read it
     sharedState.linkIsSparse(isSparseHere)
@@ -83,18 +84,6 @@ class SharedDatasetState(columnParams: ColumnParams,
   def getSharedStreamingDatasets(): Array[LightGBMDataset] =
   {
     streamingPartitionDatasets.flatten(pair => pair._2).toArray
-  }
-
-  def getArrayType(rowsIter: Iterator[Row], matrixType: String): (Iterator[Row], Boolean) = {
-    if (matrixType == "auto") {
-      sampleRowsForArrayType(rowsIter, columnParams)
-    } else if (matrixType == "sparse") {
-      (rowsIter: Iterator[Row], true)
-    } else if (matrixType == "dense") {
-      (rowsIter: Iterator[Row], false)
-    } else {
-      throw new Exception(s"Invalid parameter matrix type specified: ${matrixType}")
-    }
   }
 }
 

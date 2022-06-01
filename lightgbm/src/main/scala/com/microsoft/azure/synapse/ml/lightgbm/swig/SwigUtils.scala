@@ -183,7 +183,7 @@ class VoidPointerSwigArray(val array: SWIGTYPE_p_p_void, val size: Int) extends 
 
 // Wraps double**, which is implemented in the wrapper as an array of DoubleSwigArray
 class DoublePointerSwigArray(val array: SWIGTYPE_p_p_double, val size: Int) extends BaseSwigArray[DoubleSwigArray] {
-  val columnVectors: Array[Option[DoubleSwigArray]] = new Array[Option[DoubleSwigArray]](size)
+  val columnVectors: Array[Option[DoubleSwigArray]] = Array.fill(size)(None)
 
   def this(size: Int) = this(lightgbmlib.new_doublePtrArray(size), size)
 
@@ -206,7 +206,7 @@ class DoublePointerSwigArray(val array: SWIGTYPE_p_p_double, val size: Int) exte
 
 // Wraps int**, which is implemented in the wrapper as an array of IntSwigArray
 class IntPointerSwigArray(val array: SWIGTYPE_p_p_int, val size: Int) extends BaseSwigArray[IntSwigArray] {
-  val columnVectors: Array[Option[IntSwigArray]] = new Array[Option[IntSwigArray]](size)
+  val columnVectors: Array[Option[IntSwigArray]] = Array.fill(size)(None)
 
   def this(size: Int) = this(lightgbmlib.new_intPtrArray(size), size)
 

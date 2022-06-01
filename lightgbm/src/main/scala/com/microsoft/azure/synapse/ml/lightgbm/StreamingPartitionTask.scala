@@ -3,20 +3,10 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm
 
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.LightGBMDataset
-import com.microsoft.azure.synapse.ml.lightgbm.swig.{
-  DoubleSwigArray,
-  FloatSwigArray,
-  IntSwigArray,
-  SwigUtils,
-  VoidPointerSwigArray}
-import com.microsoft.ml.lightgbm.{
-  SWIGTYPE_p_double,
-  SWIGTYPE_p_float,
-  SWIGTYPE_p_int,
-  SWIGTYPE_p_void,
-  lightgbmlib,
-  lightgbmlibConstants}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils.getArrayType
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset, PeekingIterator}
+import com.microsoft.azure.synapse.ml.lightgbm.swig.{DoubleSwigArray, FloatSwigArray, IntSwigArray, SwigUtils, VoidPointerSwigArray}
+import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_void, lightgbmlib, lightgbmlibConstants}
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.sql._
@@ -106,6 +96,15 @@ class StreamingState(ctx: TrainingContext,
   */
 class StreamingPartitionTask extends BasePartitionTask {
   def preparePartitionData(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState = {
+
+    // Make sure isSparse is set with a value
+    val rowIterator = if (!ctx.sharedState.isSparse.isDefined) {
+      val (newRowsIter: Iterator[Row], isSparseHere: Boolean) =
+        getArrayType(inputRows, ctx.trainingParams.executionParams.matrixType, ctx.columnParams.featuresColumn)
+      ctx.sharedState.linkIsSparse(isSparseHere)
+      newRowsIter
+    } else inputRows
+
     val numPartitionRows: Long = ctx.partitionCounts.get(partitionId)
 
     // TODO For now, use precalculated partition count to just force 1 chunk per partition
@@ -115,7 +114,9 @@ class StreamingPartitionTask extends BasePartitionTask {
     // These dataset chunks will later be coalesced into 1 dataset per worker for useSingleDataset mode,
     // or 1 dataset per partition otherwise.
     // Ideally we'd create 1 dataset per partition, but allowing multiple gives us flexibility.
-    createDatasetChunks(ctx, inputRows, ctx.sharedState.datasetState, partitionId, chunkSize)
+    createDatasetChunks(ctx, rowIterator, ctx.sharedState.datasetState, partitionId, chunkSize)
+
+    ctx.log.info("created dataset chunks")
 
     // Now handle validation data, which we can make as 1 Dataset since we have a hardcoded array
     // TODO Consider moving this to shared state and only calculating on main executor task
@@ -307,6 +308,8 @@ class StreamingPartitionTask extends BasePartitionTask {
 
 
   protected def getFinalTrainingDataset(ctx: TrainingContext): LightGBMDataset = {
+    ctx.log.info("getting final dataset")
+
     val allDatasets = ctx.sharedState.datasetState.getSharedStreamingDatasets()
 
     // TODO optimize for 1 dataset? or use first as base?
@@ -315,17 +318,16 @@ class StreamingPartitionTask extends BasePartitionTask {
     ctx.log.info(s"LightGBM task generating final dataset with $totalNumRows")
     val dataset = getReferenceDataset(ctx, totalNumRows)
 
-    val pointer = lightgbmlib.voidpp_handle()
     val datasetNativePointers = new VoidPointerSwigArray(allDatasets.length)
     allDatasets.zipWithIndex.foreach { case (ptr, i) => datasetNativePointers.setItem(i, ptr.datasetPtr) }
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCoalesce(
-      dataset.datasetPtr,
-      datasetNativePointers.array,
-      allDatasets.length), "Dataset push micro-batch")
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCoalesce(dataset.datasetPtr,
+                                                            datasetNativePointers.array,
+                                                            allDatasets.length),
+                "Dataset push micro-batch")
 
-    val datasetPtr = lightgbmlib.voidpp_value(pointer);
-    lightgbmlib.delete_voidpp(pointer)
-    new LightGBMDataset(datasetPtr)
+    ctx.log.info("done getting final dataset")
+
+    dataset
   }
 
   private def getReferenceDataset(ctx: TrainingContext,
@@ -336,12 +338,13 @@ class StreamingPartitionTask extends BasePartitionTask {
     // Convert byte array to native memory
     val pointer = lightgbmlib.voidpp_handle()
     val nativeByteArray = SwigUtils.byteArrayToNative(serializedDataset)
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSerializedReference(
-      lightgbmlib.byte_to_voidp_ptr(nativeByteArray),
-      serializedDataset.length,
-      numRows,
-      ctx.datasetParams,
-      pointer), "Dataset create from reference")
+    LightGBMUtils.validate(
+      lightgbmlib.LGBM_DatasetCreateFromSerializedReference(lightgbmlib.byte_to_voidp_ptr(nativeByteArray),
+                                                            serializedDataset.length,
+                                                            numRows,
+                                                            ctx.datasetParams,
+                                                            pointer),
+      "Dataset create from reference")
 
     val datasetPtr = lightgbmlib.voidpp_value(pointer);
     lightgbmlib.delete_voidpp(pointer)
