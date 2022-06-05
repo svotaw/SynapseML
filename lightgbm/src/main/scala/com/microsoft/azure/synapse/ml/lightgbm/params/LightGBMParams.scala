@@ -6,7 +6,7 @@ package com.microsoft.azure.synapse.ml.lightgbm.params
 import com.microsoft.azure.synapse.ml.codegen.Wrappable
 import com.microsoft.azure.synapse.ml.core.contracts.{HasInitScoreCol, HasValidationIndicatorCol, HasWeightCol}
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
-import com.microsoft.azure.synapse.ml.lightgbm.{LightGBMConstants, LightGBMDelegate}
+import com.microsoft.azure.synapse.ml.lightgbm.{ExecutionMeasures, LightGBMConstants, LightGBMDelegate}
 import org.apache.spark.ml.param._
 import org.apache.spark.ml.util.DefaultParamsWritable
 

@@ -4,13 +4,14 @@
 package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils.getArrayType
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset, PeekingIterator}
-import com.microsoft.azure.synapse.ml.lightgbm.swig.{DoubleSwigArray, FloatSwigArray, IntSwigArray, SwigUtils, VoidPointerSwigArray}
-import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_void, lightgbmlib, lightgbmlibConstants}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset}
+import com.microsoft.azure.synapse.ml.lightgbm.swig._
+import com.microsoft.ml.lightgbm._
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.sql._
 
+import scala.annotation.tailrec
 import scala.language.existentials
 
 class StreamingState(ctx: TrainingContext,
@@ -136,7 +137,8 @@ class StreamingPartitionTask extends BasePartitionTask {
     PartitionDataState(None, None, validationDataset)
   }
 
-  def createDatasetChunks(ctx: TrainingContext,
+  @tailrec
+  private def createDatasetChunks(ctx: TrainingContext,
                           inputRows: Iterator[Row],
                           sharedDatasetState: SharedDatasetState,
                           partitionId: Int,
@@ -168,7 +170,8 @@ class StreamingPartitionTask extends BasePartitionTask {
     }
   }
 
-  def pushDenseMicroBatches(state: StreamingState,
+  @tailrec
+  private def pushDenseMicroBatches(state: StreamingState,
                             maxNumRows: Int,
                             inputRows: Iterator[Row],
                             startIndex: Int): Unit = {
@@ -195,7 +198,8 @@ class StreamingPartitionTask extends BasePartitionTask {
     }
   }
 
-  def pushSparseMicroBatches(state: StreamingState,
+  @tailrec
+  private def pushSparseMicroBatches(state: StreamingState,
                              maxNumRows: Int,
                              inputRows: Iterator[Row],
                              startIndex: Int): Unit = {
@@ -235,7 +239,8 @@ class StreamingPartitionTask extends BasePartitionTask {
     }
   }
 
-  def loadOneDenseMicroBatchBuffer(state: StreamingState,
+  @tailrec
+  private def loadOneDenseMicroBatchBuffer(state: StreamingState,
                                    inputRows: Iterator[Row],
                                    count: Int,
                                    maxBatchCount: Int): Int = {
@@ -256,7 +261,8 @@ class StreamingPartitionTask extends BasePartitionTask {
     } else count
   }
 
-  def loadOneSparseMicroBatchBuffer(state: StreamingState,
+  @tailrec
+  private def loadOneSparseMicroBatchBuffer(state: StreamingState,
                                     inputRows: Iterator[Row],
                                     count: Int,
                                     maxBatchCount: Int): Int = {
@@ -327,6 +333,8 @@ class StreamingPartitionTask extends BasePartitionTask {
 
     ctx.log.info("done getting final dataset")
 
+    ctx.sharedState.datasetState.freeSharedStreamingDatasets()
+
     dataset
   }
 
@@ -346,7 +354,17 @@ class StreamingPartitionTask extends BasePartitionTask {
                                                             pointer),
       "Dataset create from reference")
 
-    val datasetPtr = lightgbmlib.voidpp_value(pointer);
+    val datasetPtr = lightgbmlib.voidpp_value(pointer)
+
+    LightGBMUtils.validate(
+      lightgbmlib.LGBM_DatasetInitMetadata(datasetPtr,
+        numRows,
+        if (ctx.hasWeights) 1 else 0,
+        if (ctx.hasInitialScores) 1 else 0,
+        if (ctx.hasValid) 1 else 0,
+        ctx.numInitScoreClasses),
+      "Dataset create from reference")
+
     lightgbmlib.delete_voidpp(pointer)
     new LightGBMDataset(datasetPtr)
   }

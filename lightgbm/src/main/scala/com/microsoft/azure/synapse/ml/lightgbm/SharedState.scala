@@ -6,6 +6,7 @@ package com.microsoft.azure.synapse.ml.lightgbm
 import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils._
 import com.microsoft.azure.synapse.ml.lightgbm.dataset._
 import com.microsoft.azure.synapse.ml.lightgbm.params.BaseTrainParams
+import com.microsoft.ml.lightgbm.lightgbmlib
 import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.StructType
 import org.slf4j.Logger
@@ -94,6 +95,12 @@ class SharedDatasetState(columnParams: ColumnParams,
   def getSharedStreamingDatasets(): Array[LightGBMDataset] =
   {
     streamingPartitionDatasets.flatten(pair => pair._2).toArray
+  }
+
+  def freeSharedStreamingDatasets(): Unit = {
+    val allDatasets = getSharedStreamingDatasets()
+    allDatasets.foreach(ds => LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),
+      "Dataset free"))
   }
 }
 

@@ -266,6 +266,49 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     numTasks.foreach(nTasks => assertFitWithoutErrors(baseModel.setNumTasks(nTasks), pimaDF))
   }
 
+  test("Verify performance measures") {
+    val Array(train, _) = taskDF.randomSplit(Array(0.8, 0.2), seed)
+    val measuredModel = baseModel // TODO How does this make fresh copy?
+    val _ = measuredModel.fit(train)
+    val measuresOpt =  measuredModel.getPerformanceMeasures()
+
+    assert(measuresOpt.isDefined)
+    val measures = measuresOpt.get
+    val totalTime = measures.totalTime
+    assert(totalTime > 0)
+    println(s"Total time: $totalTime")
+    val columnStatisticsTime = measures.columnStatisticsTime
+    assert(columnStatisticsTime > 0)
+    println(s"Column statistics time: $columnStatisticsTime")
+    val trainingTime = measures.trainingTime
+    assert(trainingTime > 0)
+    println(s"Training time: $trainingTime")
+
+    val taskTimes = measures.taskTotalTimes()
+    assert(taskTimes.size > 0)
+    taskTimes.foreach(t => assert(t > 0))
+    println(s"Task total times: ${taskTimes.mkString(",")}")
+    val taskDataPreparationTimes = measures.taskDataPreparationTimes()
+    assert(taskDataPreparationTimes.size > 0)
+    taskDataPreparationTimes.foreach(t => assert(t > 0))
+    println(s"Task data preparation times: ${taskDataPreparationTimes.mkString(",")}")
+    val taskDatasetCreationTimes = measures.taskDatasetCreationTimes()
+    assert(taskDatasetCreationTimes.size > 0)
+    assert(taskDatasetCreationTimes.sum > 0)
+    println(s"Task dataset creation times: ${taskDatasetCreationTimes.mkString(",")}")
+    val taskTrainingIterationTimes = measures.taskTrainingIterationTimes()
+    assert(taskTrainingIterationTimes.size > 0)
+    assert(taskTrainingIterationTimes.sum > 0)
+    println(s"Task training iteration times: ${taskTrainingIterationTimes.mkString(",")}")
+
+    val tasks = measures.getTaskMeasures()
+    val activeTasks = tasks.filter(t => t.isActiveTrainingTask).map(t => t.partitionId)
+    println(s"Active tasks: ${activeTasks.mkString(",")}")
+
+
+    // TODO verify all diff measures that are 0 by default
+  }
+
   test("Verify LightGBM Classifier with max delta step parameter") {
     // If the max delta step is specified, assert AUC differs (assert parameter works)
     // Note: the final max output of leaves is learning_rate * max_delta_step, so param should reduce the effect
