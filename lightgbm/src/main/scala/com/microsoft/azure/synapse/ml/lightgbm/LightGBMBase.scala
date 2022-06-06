@@ -553,7 +553,8 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
   protected def calculateRowStatistics(dataframe: DataFrame,
                                        trainingParams: BaseTrainParams,
                                        numCols: Int,
-                                       stats: ExecutionMeasures): (Array[Byte], Array[Long]) = {
+                                       measures: ExecutionMeasures): (Array[Byte], Array[Long]) = {
+    measures.markRowStatisticsStart()
     // Get the row counts per partition
     val indexedRowCounts: Array[(Int, Long)] = dataframe
       .rdd
@@ -583,7 +584,14 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     val datasetParams = getDatasetCreationParams(
       trainingParams.generalParams.categoricalFeatures,
       trainingParams.executionParams.numThreads)
-    val serializedReference = createReferenceDataset(totalNumRows.toInt, numCols, datasetParams, sampleData, log)
+
+    val serializedReference = createReferenceDataset(totalNumRows.toInt,
+      numCols,
+      datasetParams,
+      sampleData,
+      trainingParams.generalParams.featureNames,
+      log)
+    measures.markRowStatisticsStop()
     (serializedReference, rowCounts)
   }
 

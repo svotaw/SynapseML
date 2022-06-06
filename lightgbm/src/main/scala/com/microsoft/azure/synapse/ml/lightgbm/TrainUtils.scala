@@ -78,6 +78,7 @@ private object TrainUtils extends Serializable {
                              numCols: Int,
                              datasetParams: String,
                              sampleData: SampledData,
+                             featureNames: Array[String],
                              log: Logger): Array[Byte] = {
     log.info(s"LightGBM task generating schema for empty dense dataset with $numRows rows and $numCols columns")
     // Generate the dataset for features
@@ -92,8 +93,14 @@ private object TrainUtils extends Serializable {
       datasetParams,
       dataset), "Dataset create")
 
-    val buffer = lightgbmlib.voidpp_handle()
     val datasetHandle = lightgbmlib.voidpp_value(dataset)
+
+    if (featureNames.nonEmpty) {
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetSetFeatureNames(datasetHandle, featureNames, numCols),
+        "Dataset set feature names")
+    }
+
+    val buffer = lightgbmlib.voidpp_handle()
     val lenPtr = lightgbmlib.new_intp()
     LightGBMUtils.validate(lightgbmlib.LGBM_DatasetSerializeReferenceToBinary(
       datasetHandle,

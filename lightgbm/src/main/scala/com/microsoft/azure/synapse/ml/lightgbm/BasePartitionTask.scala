@@ -70,6 +70,7 @@ abstract class BasePartitionTask extends Serializable {
     */
   protected def generateFinalDatasetInternal(ctx: TrainingContext,
                                              dataState: PartitionDataState,
+                                             partitionIndex: Int,
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset
 
@@ -84,9 +85,10 @@ abstract class BasePartitionTask extends Serializable {
     */
   private def generateFinalDataset(ctx: TrainingContext,
                                    dataState: PartitionDataState,
+                                   partitionIndex: Int,
                                    forValidation: Boolean,
                                    referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
-    val dataset = generateFinalDatasetInternal(ctx, dataState, forValidation, referenceDataset)
+    val dataset = generateFinalDatasetInternal(ctx, dataState, partitionIndex, forValidation, referenceDataset)
 
     // Validate generated dataset has the correct number of rows and cols
     dataset.validateDataset()
@@ -107,10 +109,11 @@ abstract class BasePartitionTask extends Serializable {
                                   dataState: PartitionDataState,
                                   taskMeasures: TaskExecutionMeasures,
                                   shouldReturnBooster: Boolean): Iterator[PartitionResult] = {
+    val partitionId = TaskContext.getPartitionId
     taskMeasures.markDatasetCreationStart()
     taskMeasures.isActiveTrainingTask = true
     beforeGenerateTrainDataset(ctx)
-    val trainDataset: LightGBMDataset = generateFinalDataset(ctx, dataState, false, None)
+    val trainDataset: LightGBMDataset = generateFinalDataset(ctx, dataState, partitionId, false, None)
     taskMeasures.markDatasetCreationStop()
     try {
       afterGenerateTrainDataset(ctx)
@@ -119,16 +122,15 @@ abstract class BasePartitionTask extends Serializable {
        else {
           taskMeasures.markValidationDatasetCreationStart()
           beforeGenerateValidDataset(ctx)
-          val out = generateFinalDataset(ctx, dataState, true, Some(trainDataset))
+          val out = generateFinalDataset(ctx, dataState, partitionId, true, Some(trainDataset))
           afterGenerateValidDataset(ctx)
           taskMeasures.markValidationDatasetCreationStop()
           Option(out)
         }
 
       try {
-        val state = PartitionTaskTrainingState(ctx,
-                                               TaskContext.getPartitionId,
-                                               createBooster(ctx.trainingParams, trainDataset, validDatasetOpt))
+        val booster = createBooster(ctx.trainingParams, trainDataset, validDatasetOpt)
+        val state = PartitionTaskTrainingState(ctx, partitionId, booster)
         try {
           taskMeasures.markTrainingIterationsStart()
           val bestIterResult = executeTrainingIterations(state)

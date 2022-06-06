@@ -28,6 +28,7 @@ class BulkPartitionTask extends BasePartitionTask {
 
   protected def generateFinalDatasetInternal(ctx: TrainingContext,
                                              dataState: PartitionDataState,
+                                             partitionIndex: Int,
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
     val ac = if (forValidation) dataState.aggregatedValidationData.get else dataState.aggregatedTrainingData.get
