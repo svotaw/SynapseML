@@ -97,6 +97,12 @@ class SharedDatasetState(columnParams: ColumnParams,
     streamingPartitionDatasets.flatten(pair => pair._2).toArray
   }
 
+  // TODO need whole array?
+  def getSharedStreamingDatasetForPartition(partitionIndex: Int): LightGBMDataset =
+  {
+    streamingPartitionDatasets(partitionIndex).head
+  }
+
   def freeSharedStreamingDatasets(): Unit = {
     val allDatasets = getSharedStreamingDatasets()
     allDatasets.foreach(ds => LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),

@@ -33,7 +33,8 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
     if (validationDatasetCreationStop == 0) 0 else validationDatasetCreationStop - validationDatasetCreationStart
   }
   def trainingIterationsTime: Long = {
-    if (trainingIterationsStop == 0) 0 else trainingIterationsStop - trainingIterationsStart
+    if (trainingIterationsStop == 0) 0
+    else Math.max(1, trainingIterationsStop - trainingIterationsStart)
   }
   def totalTime: Long = { if (endTime == 0) 0 else endTime - startTime }
 }
