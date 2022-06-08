@@ -316,33 +316,97 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
   test("Performance testing") {
     // modify this test for getting some simple performance measures
     val dataset = taskDF
-    val executionModes = Array("streaming", "bulk")
-    val matrixTypes = Array("dense", "sparse")
-    val useSingleDatasetModes = Array(true, false)
+    val measurementCount = 9
+    val executionModes = Array("bulk")  // streaming, bulk
+    val microBatchSizes = Array(100) // 1, 2, 4, 8, 16, 32, 100, 1000)
+    val matrixTypes = Array("dense")  // dense, sparse, auto
+    val useSingleDatasetModes = Array(true)
 
     executionModes.foreach(executionMode => {
       matrixTypes.foreach(matrixType => {
-        useSingleDatasetModes.foreach(useSingleDataset => {
-          println(s"*********************************************************************************************")
-          println(s"**** ExecutionMode: $executionMode, MatrixType: $matrixType, useSingleDataset: $useSingleDataset")
-          measurePerformance(dataset, executionMode, matrixType, useSingleDataset)
-          println(s"*********************************************************************************************")
+        microBatchSizes.foreach(microBatchSize => {
+          useSingleDatasetModes.foreach(useSingleDataset => {
+            println(s"*********************************************************************************************")
+            println(s"**** Start ExecutionMode: $executionMode, MatrixType: $matrixType, " +
+              s"useSingleDataset: $useSingleDataset, MicroBatchSize: $microBatchSize")
+            measurePerformance(dataset, measurementCount, executionMode, microBatchSize, matrixType, useSingleDataset)
+            println(s"**** Done ExecutionMode: $executionMode, MatrixType: $matrixType, " +
+              s"useSingleDataset: $useSingleDataset, MicroBatchSize: $microBatchSize")
+            println(s"*********************************************************************************************")
+          })
         })
       })
     })
   }
 
   def measurePerformance(df: DataFrame,
+                         measurementCount: Int,
                          executionMode: String,
+                         microBatchSize: Int,
                          matrixType: String,
                          useSingleDataset: Boolean): Unit = {
     val Array(train, _) = df.randomSplit(Array(0.8, 0.2), seed)
-    val measuredModel = baseModel
-      .setUseSingleDatasetMode(useSingleDataset)
-      .setExecutionMode(executionMode)
-      .setMatrixType(matrixType)
-    val _ = measuredModel.fit(train)
-    val measuresOpt =  measuredModel.getPerformanceMeasures()
+    val measurements = Array.ofDim[ExecutionMeasures](measurementCount)
+
+    (0 until measurementCount).foreach(i => {
+      println(s"** Start Measurement $i")
+
+      val measuredModel = baseModel
+        .setUseSingleDatasetMode(useSingleDataset)
+        .setExecutionMode(executionMode)
+        .setMatrixType(matrixType)
+        .setMicroBatchSize(microBatchSize)
+
+      val _ = measuredModel.fit(train)
+      measurements(i) = measuredModel.getPerformanceMeasures().get
+      println(s"Total time, ${measurements(i).totalTime}")
+      println(s"Column statistics, ${measurements(i).columnStatisticsTime}")
+      println(s"Row statistics time, ${measurements(i).rowStatisticsTime}")
+      println(s"Row count time, ${measurements(i).rowCountTime()}")
+      println(s"Sampling time, ${measurements(i).samplingTime()}")
+      println(s"Training time, ${measurements(i).trainingTime}")
+      println(s"Overhead time, ${measurements(i).overheadTime}")
+      println(s"Task total times, ${measurements(i).taskTotalTimes.mkString(",")}")
+      println(s"Task overhead times, ${measurements(i).taskOverheadTimes().mkString(",")}")
+      println(s"Task data preparation times, ${measurements(i).taskDataPreparationTimes.mkString(",")}")
+      println(s"Task dataset creation times, ${measurements(i).taskDatasetCreationTimes.mkString(",")}")
+      println(s"Task training iteration times, ${measurements(i).taskTrainingIterationTimes.mkString(",")}")
+      println(s"** Completed Measurement $i")
+    })
+    println(s"***** Averaged results for $measurementCount runs")
+    var median = getMedian(measurements.map(m => m.totalTime))
+    println(s"Median Total time, $median")
+    median = getMedian(measurements.map(m => m.columnStatisticsTime))
+    println(s"Median Column statistics, $median")
+    median = getMedian(measurements.map(m => m.rowCountTime()))
+    println(s"Median Row count time, $median")
+    median = getMedian(measurements.map(m => m.samplingTime()))
+    println(s"Median Sampling time, $median")
+    median = getMedian(measurements.map(m => m.rowStatisticsTime()))
+    println(s"Median Row statistics time, $median")
+    median = getMedian(measurements.map(m => m.trainingTime))
+    println(s"Median Training time, $median")
+    median = getMedian(measurements.map(m => m.overheadTime))
+    println(s"Median Overhead time, $median")
+    var medianMax = getMedian(measurements.map(m => m.taskTotalTimes.max))
+    println(s"Median-max Task total times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskDataPreparationTimes.max))
+    println(s"Median-max Task data preparation times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskDatasetCreationTimes.max))
+    println(s"Median-max Task dataset creation times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskTrainingIterationTimes.max))
+    println(s"Median-max Task training iteration times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskOverheadTimes().max))
+    println(s"Median-max Task overhead times, $medianMax")
+  }
+
+  def getMedian[T: Ordering](seq: Seq[T])(implicit conv: T => Float, f: Fractional[Float]): Float = {
+    val sortedSeq = seq.sorted
+    if (seq.size % 2 == 1) sortedSeq(sortedSeq.size / 2)  else {
+      val (up, down) = sortedSeq.splitAt(seq.size / 2)
+      import f._
+      (conv(up.last) + conv(down.head)) / fromInt(2)
+    }
   }
 
   test("Verify LightGBM Classifier with max delta step parameter") {

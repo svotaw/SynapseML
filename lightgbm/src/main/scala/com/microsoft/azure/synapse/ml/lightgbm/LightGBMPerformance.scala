@@ -37,6 +37,13 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
     else Math.max(1, trainingIterationsStop - trainingIterationsStart)
   }
   def totalTime: Long = { if (endTime == 0) 0 else endTime - startTime }
+  def overheadTime: Long = {
+    (totalTime
+      - dataPreparationTime
+      - datasetCreationTime
+      - validationDatasetCreationTime
+      - trainingIterationsTime)
+  }
 }
 
 class ExecutionMeasures() extends Serializable {
@@ -47,6 +54,10 @@ class ExecutionMeasures() extends Serializable {
   private var columnStatisticsStop: Long = 0
   private var rowStatisticsStart: Long = 0
   private var rowStatisticsStop: Long = 0
+  private var rowCountsStart: Long = 0
+  private var rowCountsStop: Long = 0
+  private var samplingStart: Long = 0
+  private var samplingStop: Long = 0
   private var trainingStart: Long = 0
   private var trainingStop: Long = 0
   private var endTime: Long = 0
@@ -61,6 +72,10 @@ class ExecutionMeasures() extends Serializable {
   def markColumnStatisticsStop(): Unit = { columnStatisticsStop = System.currentTimeMillis() }
   def markRowStatisticsStart(): Unit = { rowStatisticsStart = System.currentTimeMillis() }
   def markRowStatisticsStop(): Unit = { rowStatisticsStop = System.currentTimeMillis() }
+  def markRowCountsStart(): Unit = { rowCountsStart = System.currentTimeMillis() }
+  def markRowCountsStop(): Unit = { rowCountsStop = System.currentTimeMillis() }
+  def markSamplingStart(): Unit = { samplingStart = System.currentTimeMillis() }
+  def markSamplingStop(): Unit = { samplingStop = System.currentTimeMillis() }
   def markTrainingStart(): Unit = { trainingStart = System.currentTimeMillis() }
   def markTrainingStop(): Unit = { trainingStop = System.currentTimeMillis() }
   def markExecutionEnd(): Unit = { endTime = System.currentTimeMillis() }
@@ -78,10 +93,21 @@ class ExecutionMeasures() extends Serializable {
   def rowStatisticsTime(): Long = {
     if (rowStatisticsStop == 0) 0
     else Math.max(1, rowStatisticsStop - rowStatisticsStart) }
+  def rowCountTime(): Long = {
+    if (rowCountsStop == 0) 0
+    else Math.max(1, rowCountsStop - rowCountsStart) }
+  def samplingTime(): Long = {
+    if (samplingStop == 0) 0
+    else Math.max(1, samplingStop - samplingStart) }
   def trainingTime(): Long = {
     if (trainingStop == 0) 0
     else Math.max(1, trainingStop - trainingStart) }
   def totalTime: Long = { if (endTime == 0) 0 else endTime - startTime }
+
+  def overheadTime: Long = { (totalTime
+    - columnStatisticsTime()
+    - rowStatisticsTime()
+    - trainingTime()) }
 
   def taskDataPreparationTimes(): Seq[Long] = {
     if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.dataPreparationTime) else Seq()
@@ -101,6 +127,11 @@ class ExecutionMeasures() extends Serializable {
 
   def taskTotalTimes(): Seq[Long] = {
     if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.totalTime) else Seq()
+  }
+
+  def taskOverheadTimes(): Seq[Long] = {
+    val debug = taskMeasures.get(0).overheadTime
+    if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.overheadTime) else Seq()
   }
 }
 
