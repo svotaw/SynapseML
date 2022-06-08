@@ -172,12 +172,14 @@ case class DartModeParams(dropRate: Double,
   *                   constructed should be sparse or dense.
   * @param numThreads The number of threads to run the native lightgbm training with on each worker.
   * @param executionMode How to execute the LightGBM training.
+  * @param microBatchSize The number of elements in a streaming micro-batch.
   * @param useSingleDatasetMode Whether to create only 1 LightGBM Dataset on each worker.
   */
 case class ExecutionParams(chunkSize: Int,
                            matrixType: String,
                            numThreads: Int,
                            executionMode: String,
+                           microBatchSize: Int,
                            useSingleDatasetMode: Boolean) extends ParamGroup {
   def appendParams(sb: ParamsStringBuilder): ParamsStringBuilder = {
     sb.appendParamValueIfNotThere("num_threads", Option(numThreads))

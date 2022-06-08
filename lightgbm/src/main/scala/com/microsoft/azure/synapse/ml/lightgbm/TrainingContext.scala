@@ -28,7 +28,6 @@ case class TrainingContext(batchIndex: Int,
                            schema: StructType,
                            numCols: Int,
                            numInitScoreClasses: Int,
-                           microBatchSize: Int,
                            trainingParams: BaseTrainParams,
                            networkParams: NetworkParams,
                            columnParams: ColumnParams,
@@ -43,6 +42,7 @@ case class TrainingContext(batchIndex: Int,
   val isProvideTrainingMetric: Boolean = { trainingParams.isProvideTrainingMetric.getOrElse(false) }
   val improvementTolerance: Double = { trainingParams.generalParams.improvementTolerance }
   val earlyStoppingRound: Int = { trainingParams.generalParams.earlyStoppingRound }
+  val microBatchSize: Int = { trainingParams.executionParams.microBatchSize }
 
   val useSingleDatasetMode = trainingParams.executionParams.useSingleDatasetMode
 

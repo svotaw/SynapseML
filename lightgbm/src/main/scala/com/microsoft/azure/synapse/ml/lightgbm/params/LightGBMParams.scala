@@ -64,6 +64,12 @@ trait LightGBMExecutionParams extends Wrappable {
   def getExecutionMode: String = $(executionMode)
   def setExecutionMode(value: String): this.type = set(executionMode, value)
 
+  val microBatchSize = new Param[Int](this, "microBatchSize",
+    "Specify how many elements are sent in a streaming micro-batch.")
+  setDefault(microBatchSize -> 1)
+  def getMicroBatchSize: Int = $(microBatchSize)
+  def setMicroBatchSize(value: Int): this.type = set(microBatchSize, value)
+
   val useSingleDatasetMode = new BooleanParam(this, "useSingleDatasetMode",
     "Use single dataset execution mode to create a single native dataset per executor (singleton) " +
       "to reduce memory and communication overhead. Note this is disabled when running spark in local mode.")

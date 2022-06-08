@@ -317,7 +317,12 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     val execNumThreads =
       if (getUseSingleDatasetMode) get(numThreads).getOrElse(numTasksPerExec - 1)
       else getNumThreads
-    ExecutionParams(getChunkSize, getMatrixType, execNumThreads, getExecutionMode, getUseSingleDatasetMode)
+    ExecutionParams(getChunkSize,
+      getMatrixType,
+      execNumThreads,
+      getExecutionMode,
+      getMicroBatchSize,
+      getUseSingleDatasetMode)
   }
 
   /**
@@ -555,17 +560,22 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
                                        numCols: Int,
                                        measures: ExecutionMeasures): (Array[Byte], Array[Long]) = {
     measures.markRowStatisticsStart()
+
     // Get the row counts per partition
+    measures.markRowCountsStart()
     val indexedRowCounts: Array[(Int, Long)] = dataframe
+      .select(getLabelCol)
       .rdd
       .mapPartitionsWithIndex({case (i,rows) => Iterator((i,rows.size.toLong))}, true)
       .collect()
     val rowCounts: Array[Long] = new Array[Long](indexedRowCounts.size)
     indexedRowCounts.foreach(pair => rowCounts(pair._1) = pair._2)
     val totalNumRows = indexedRowCounts.map(partition => partition._2).sum
+    measures.markRowCountsStop()
 
     // Get sample data using sample() function in Spark
     // TODO optimize with just a take() in case of user approval
+    measures.markSamplingStart()
     val sampleCount: Int = getBinSampleCount
     val seed: Int = getSeedParams.dataRandomSeed.getOrElse(42) // TODO data or just plain seed?
     val featureColName = getFeaturesCol
@@ -578,6 +588,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     // Make a wrapped object that formats the binary sample data as needed by LightGBM
     val sampleData = new SampledData(numSamples, numCols)
     rawSampleData.collect().foreach(row => sampleData.pushRow(row, featureColName))
+    measures.markSamplingStop()
 
     // Get reference data set using sampled data
     // Use driver node to run LightGBM in standalone mode
@@ -682,7 +693,6 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       schema,
       numCols,
       numInitValueClasses,
-      1, // TODO where to set this? (microBatchSize)
       trainParams,
       networkParams,
       columnParams,
