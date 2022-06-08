@@ -269,7 +269,8 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
 
   test("Verify performance measures") {
     val Array(train, _) = taskDF.randomSplit(Array(0.8, 0.2), seed)
-    val measuredModel = baseModel // TODO How does this make fresh copy?
+    // TODO How does this make fresh copy?
+    val measuredModel = baseModel.setUseSingleDatasetMode(false).setExecutionMode("streaming").setMatrixType("dense")
     val _ = measuredModel.fit(train)
     val measuresOpt =  measuredModel.getPerformanceMeasures()
 
@@ -288,19 +289,19 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     println(s"Training time: $trainingTime")
 
     val taskTimes = measures.taskTotalTimes()
-    assert(taskTimes.size > 0)
+    assert(taskTimes.nonEmpty)
     taskTimes.foreach(t => assert(t > 0))
     println(s"Task total times: ${taskTimes.mkString(",")}")
     val taskDataPreparationTimes = measures.taskDataPreparationTimes()
-    assert(taskDataPreparationTimes.size > 0)
+    assert(taskDataPreparationTimes.nonEmpty)
     taskDataPreparationTimes.foreach(t => assert(t > 0))
     println(s"Task data preparation times: ${taskDataPreparationTimes.mkString(",")}")
     val taskDatasetCreationTimes = measures.taskDatasetCreationTimes()
-    assert(taskDatasetCreationTimes.size > 0)
+    assert(taskDatasetCreationTimes.nonEmpty)
     assert(taskDatasetCreationTimes.sum > 0)
     println(s"Task dataset creation times: ${taskDatasetCreationTimes.mkString(",")}")
     val taskTrainingIterationTimes = measures.taskTrainingIterationTimes()
-    assert(taskTrainingIterationTimes.size > 0)
+    assert(taskTrainingIterationTimes.nonEmpty)
     // TODO assert(taskTrainingIterationTimes.sum > 0)
     println(s"Task training iteration times: ${taskTrainingIterationTimes.mkString(",")}")
 
@@ -310,6 +311,38 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
 
 
     // TODO verify all diff measures that are 0 by default
+  }
+
+  test("Performance testing") {
+    // modify this test for getting some simple performance measures
+    val dataset = taskDF
+    val executionModes = Array("streaming", "bulk")
+    val matrixTypes = Array("dense", "sparse")
+    val useSingleDatasetModes = Array(true, false)
+
+    executionModes.foreach(executionMode => {
+      matrixTypes.foreach(matrixType => {
+        useSingleDatasetModes.foreach(useSingleDataset => {
+          println(s"*********************************************************************************************")
+          println(s"**** ExecutionMode: $executionMode, MatrixType: $matrixType, useSingleDataset: $useSingleDataset")
+          measurePerformance(dataset, executionMode, matrixType, useSingleDataset)
+          println(s"*********************************************************************************************")
+        })
+      })
+    })
+  }
+
+  def measurePerformance(df: DataFrame,
+                         executionMode: String,
+                         matrixType: String,
+                         useSingleDataset: Boolean): Unit = {
+    val Array(train, _) = df.randomSplit(Array(0.8, 0.2), seed)
+    val measuredModel = baseModel
+      .setUseSingleDatasetMode(useSingleDataset)
+      .setExecutionMode(executionMode)
+      .setMatrixType(matrixType)
+    val _ = measuredModel.fit(train)
+    val measuresOpt =  measuredModel.getPerformanceMeasures()
   }
 
   test("Verify LightGBM Classifier with max delta step parameter") {
@@ -381,6 +414,8 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
         .setLearningRate(0.9)
         .setMinDataInLeaf(2)
         .setValidationIndicatorCol(validationCol)
+        .setUseBarrierExecutionMode(true) // added for DEBUG, so remove
+        .setUseSingleDatasetMode(true) // added for DEBUG, so remove
         .setEarlyStoppingRound(100)
 
       // model2 should terminate early before overfitting
@@ -390,6 +425,8 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
         .setLearningRate(0.9)
         .setMinDataInLeaf(2)
         .setValidationIndicatorCol(validationCol)
+        .setUseBarrierExecutionMode(true) // added for DEBUG, so remove
+        .setUseSingleDatasetMode(true) // added for DEBUG, so remove
         .setEarlyStoppingRound(5)
 
       // Assert evaluation metric improves

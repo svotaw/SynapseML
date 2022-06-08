@@ -25,7 +25,7 @@ case class PartitionResult(booster: Option[LightGBMBooster],
   */
 case class PartitionDataState(aggregatedTrainingData: Option[BaseAggregatedColumns],
                               aggregatedValidationData: Option[BaseAggregatedColumns],
-                              streamingValidationSet: Option[LightGBMDataset] = None)
+                              streamingValidationSet: Option[LightGBMDataset] = None) // TODO might not need last one
 
 /**
   * Object to encapsulate all training state on a single partition, plus the actual Booster
@@ -59,7 +59,24 @@ abstract class BasePartitionTask extends Serializable {
     * @param partitionId The partition id.
     * @return Any intermediate data state (used mainly by bulk execution mode) to pass to future stages.
     */
-  def preparePartitionData(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState
+  def preparePartitionData(ctx: TrainingContext,
+                           inputRows: Iterator[Row],
+                           partitionId: Int,
+                           taskMeasures: TaskExecutionMeasures): PartitionDataState = {
+    taskMeasures.markDataPreparationStart()
+    val state = preparePartitionDataInternal(ctx, inputRows, partitionId)
+    taskMeasures.markDataPreparationStop()
+    state
+  }
+
+  /**
+    * Prepare any data objects for this particular partition.  Implement for specific execution modes.
+    * @param ctx The training context.
+    * @param inputRows The Spark rows for a partition as an iterator.
+    * @param partitionId The partition id.
+    * @return Any intermediate data state (used mainly by bulk execution mode) to pass to future stages.
+    */
+  def preparePartitionDataInternal(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState
 
   /**
     * Generate the final dataset for this task.  Internal implementation for specific execution modes.
@@ -87,11 +104,18 @@ abstract class BasePartitionTask extends Serializable {
                                    dataState: PartitionDataState,
                                    partitionIndex: Int,
                                    forValidation: Boolean,
-                                   referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
+                                   referenceDataset: Option[LightGBMDataset],
+                                   taskMeasures: TaskExecutionMeasures): LightGBMDataset = {
+    if (forValidation) taskMeasures.markValidationDatasetStart()
+    else taskMeasures.markDatasetCreationStart()
+
     val dataset = generateFinalDatasetInternal(ctx, dataState, partitionIndex, forValidation, referenceDataset)
 
     // Validate generated dataset has the correct number of rows and cols
     dataset.validateDataset()
+
+    if (forValidation) taskMeasures.markValidationDatasetStop()
+    else taskMeasures.markDatasetCreationStop()
     dataset
   }
 
@@ -110,26 +134,22 @@ abstract class BasePartitionTask extends Serializable {
                                   taskMeasures: TaskExecutionMeasures,
                                   shouldReturnBooster: Boolean): Iterator[PartitionResult] = {
     val partitionId = TaskContext.getPartitionId
-    taskMeasures.markDatasetCreationStart()
     taskMeasures.isActiveTrainingTask = true
     beforeGenerateTrainDataset(ctx)
-    val trainDataset: LightGBMDataset = generateFinalDataset(ctx, dataState, partitionId, false, None)
-    taskMeasures.markDatasetCreationStop()
+    val trainDataset: LightGBMDataset = generateFinalDataset(ctx, dataState, partitionId, false, None, taskMeasures)
     try {
       afterGenerateTrainDataset(ctx)
 
       val validDatasetOpt: Option[LightGBMDataset] = if (!ctx.hasValid) None
        else {
-          taskMeasures.markValidationDatasetCreationStart()
           beforeGenerateValidDataset(ctx)
-          val out = generateFinalDataset(ctx, dataState, partitionId, true, Some(trainDataset))
+          val out = generateFinalDataset(ctx, dataState, partitionId, true, Some(trainDataset), taskMeasures)
           afterGenerateValidDataset(ctx)
-          taskMeasures.markValidationDatasetCreationStop()
           Option(out)
         }
 
       try {
-        val booster = createBooster(ctx.trainingParams, trainDataset, validDatasetOpt)
+        val booster = createBooster(ctx.trainingParams, trainDataset, validDatasetOpt, ctx.log)
         val state = PartitionTaskTrainingState(ctx, partitionId, booster)
         try {
           taskMeasures.markTrainingIterationsStart()
@@ -149,7 +169,7 @@ abstract class BasePartitionTask extends Serializable {
           state.booster.freeNativeMemory()
         }
       } finally {
-        validDatasetOpt.foreach(_.close())
+        // TODO validDatasetOpt.foreach(_.close())
       }
     } finally {
       trainDataset.close()
@@ -169,50 +189,60 @@ abstract class BasePartitionTask extends Serializable {
     if (trainParams.generalParams.verbosity > 1) {
       ctx.log.info(s"LightGBM partition $partitionId running on executor $getExecutorId")
     }
-    val emptyPartition = !inputRows.hasNext
+    val isEmptyPartition = !inputRows.hasNext
     // Note: the first valid worker with non-empty partitions sets the main executor worker, other workers read it
-    if (ctx.useSingleDatasetMode && !emptyPartition) ctx.sharedState().linkMainExecutorWorker()
-    val isEnabledWorker = if (!emptyPartition) isWorkerEnabled(ctx) else false
+    if (ctx.useSingleDatasetMode && !isEmptyPartition) ctx.sharedState().linkMainExecutorWorker()
+    val isEnabledWorker = if (!isEmptyPartition) isWorkerEnabled(ctx) else false
     // Initialize the native library
     LightGBMUtils.initializeNativeLibrary()
-    // Initialize the network communication
     val (nodes, localListenPort) = getNetworkInfo(ctx, isEnabledWorker)
 
-    if (emptyPartition) {
+    if (isEmptyPartition) {
       ctx.log.warn("LightGBM task encountered empty partition, for best performance ensure no partitions empty")
       Array { PartitionResult(None, taskMeasures) }.toIterator
     } else {
       updateHelperStartSignal(ctx, isEnabledWorker, localListenPort)
-      taskMeasures.markDataPreparationStart()
-      val dataState = preparePartitionData(ctx, inputRows, partitionId)
-      taskMeasures.markDataPreparationStop()
+      val dataIntermediateState = preparePartitionData(ctx, inputRows, partitionId, taskMeasures)
 
       // Return booster only from main worker to reduce network communication overhead
       val shouldReturnBooster = getShouldReturnBooster(ctx, isEnabledWorker, nodes, localListenPort)
       try {
-        val result = if (isEnabledWorker) {
+        if (isEnabledWorker) {
           // If worker enabled, initialize the network ring of communication
-          networkInit(nodes,
-                      localListenPort,
-                      ctx.log,
-                      LightGBMConstants.NetworkRetries,
-                      LightGBMConstants.InitialDelay)
+          networkInit(nodes, localListenPort, ctx.log, LightGBMConstants.NetworkRetries, LightGBMConstants.InitialDelay)
+          if (ctx.useSingleDatasetMode) ctx.sharedState().dataPreparationDoneSignal.await()
 
-          if (ctx.useSingleDatasetMode) ctx.sharedState.doneSignal.await()
-
-          loadDatasetAndTrain(ctx, dataState, taskMeasures, shouldReturnBooster)
+          loadDatasetAndTrain(ctx, dataIntermediateState, taskMeasures, shouldReturnBooster)
         } else {
           ctx.log.info("Helper task finished processing rows")
-          ctx.sharedState.doneSignal.countDown()
+          ctx.sharedState().dataPreparationDoneSignal.countDown()
           Array { new PartitionResult(None, taskMeasures) }.toIterator
         }
-        taskMeasures.markTaskEnd()
-        result
       } finally {
-        // Finalize network when done
-        if (isEnabledWorker) LightGBMUtils.validate(lightgbmlib.LGBM_NetworkFree(), "Finalize network")
+        cleanup(ctx, isEnabledWorker, taskMeasures)
       }
     }
+  }
+
+  /** Cleanup the task
+    *
+    * @param ctx The training context.
+    * @param isEnabledWorker Whether the current work is enabled to initialize the network ring of communication.
+    * @param taskMeasures The task instrumentation.
+    */
+  private def cleanup(ctx: TrainingContext, isEnabledWorker: Boolean, taskMeasures: TaskExecutionMeasures): Unit = {
+    // Finalize network when done
+    if (isEnabledWorker) LightGBMUtils.validate(lightgbmlib.LGBM_NetworkFree(), "Finalize network")
+
+    if (ctx.isStreaming && isEnabledWorker) {
+      ctx.sharedState().trainingDoneSignal.countDown()
+      if (ctx.sharedState().trainingDoneSignal.getCount == 0)
+      {
+        ctx.sharedState().validationDatasetState.freeSharedStreamingDatasets()
+      }
+    }
+
+    taskMeasures.markTaskEnd()
   }
 
   /** Prints the listening port and, in single dataset mode, forces helper tasks to wait for the main worker
@@ -244,7 +274,9 @@ abstract class BasePartitionTask extends Serializable {
       val isMainWorker = isCurrentTaskMainWorker(ctx)
       ctx.incrementArrayProcessedSignal()
       if (!isMainWorker) {
-        ctx.incrementDoneSignal()
+        ctx.incrementDataPrepDoneSignal()
+      } else {
+        ctx.incrementTrainingDoneSignal() // TODO this should not be in a getter function
       }
       isMainWorker
     } else {

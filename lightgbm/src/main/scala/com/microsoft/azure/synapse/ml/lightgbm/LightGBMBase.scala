@@ -479,7 +479,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     val isStreamingMode = getExecutionMode == LightGBMConstants.StreamingExecutionMode
     val (serializedReferenceDataset: Option[Broadcast[Array[Byte]]], partitionCounts: Option[Array[Long]]) =
       if (isStreamingMode) {
-        val stats = calculateRowStatistics(df, trainParams, numCols, measures)
+        val stats = calculateRowStatistics(trainingData, trainParams, numCols, measures)
         (Some(sc.broadcast(stats._1)), Some(stats._2))
       }
       else (None, None)
