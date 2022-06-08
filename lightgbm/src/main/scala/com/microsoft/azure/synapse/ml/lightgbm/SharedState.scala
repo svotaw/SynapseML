@@ -97,10 +97,17 @@ class SharedDatasetState(columnParams: ColumnParams,
     streamingPartitionDatasets.flatten(pair => pair._2).toArray
   }
 
-  // TODO need whole array?
-  def getSharedStreamingDatasetForPartition(partitionIndex: Int): LightGBMDataset =
+  def getSharedStreamingDatasets(partitionIndex: Int): Array[LightGBMDataset] =
   {
-    streamingPartitionDatasets(partitionIndex).head
+    streamingPartitionDatasets(partitionIndex).toArray
+  }
+
+  def clearSharedStreamingDatasets(): Unit = {
+    streamingPartitionDatasets.clear()
+  }
+
+  def clearSharedStreamingDatasets(partitionIndex: Int): Unit = {
+    streamingPartitionDatasets.update(partitionIndex, List.empty[LightGBMDataset])
   }
 
   def freeSharedStreamingDatasets(): Unit = {
@@ -132,6 +139,12 @@ class SharedState(columnParams: ColumnParams,
 
   @volatile var isSparse: Option[Boolean] = None
   @volatile var mainExecutorWorker: Option[Long] = None
+  @volatile var validationDatasetWorker: Option[Long] = None
+
+  def getSharedValidationDataset(): LightGBMDataset = {
+    // There should only be 1 Dataset in the array
+    validationDatasetState.getSharedStreamingDatasets().head
+  }
 
   def linkIsSparse(isSparse: Boolean): Unit = {
     if (this.isSparse.isEmpty) {
@@ -153,18 +166,37 @@ class SharedState(columnParams: ColumnParams,
     }
   }
 
+  def linkValidationDatasetWorker(): Unit = {
+    if (this.validationDatasetWorker.isEmpty) {
+      this.synchronized {
+        if (this.validationDatasetWorker.isEmpty) {
+          this.validationDatasetWorker = Some(LightGBMUtils.getTaskId)
+        }
+      }
+    }
+  }
+
   def incrementArrayProcessedSignal(log: Logger): Int = {
     datasetState.incrementArrayProcessedSignal(log)
     validationDatasetState.incrementArrayProcessedSignal(log)
   }
 
-  @volatile var doneSignal: CountDownLatch = new CountDownLatch(0)
+  @volatile var dataPreparationDoneSignal: CountDownLatch = new CountDownLatch(0)
+  @volatile var trainingDoneSignal: CountDownLatch = new CountDownLatch(0)
 
-  def incrementDoneSignal(log: Logger): Unit = {
+  def incrementDataPrepDoneSignal(log: Logger): Unit = {
     this.synchronized {
-      val count = doneSignal.getCount.toInt + 1
-      doneSignal = new CountDownLatch(count)
-      log.info(s"Task incrementing DoneSignal to $count")
+      val count = dataPreparationDoneSignal.getCount.toInt + 1
+      dataPreparationDoneSignal = new CountDownLatch(count)
+      log.info(s"Task incrementing DataPrepDoneSignal to $count")
+    }
+  }
+
+  def incrementTrainingDoneSignal(log: Logger): Unit = {
+    this.synchronized {
+      val count = trainingDoneSignal.getCount.toInt + 1
+      trainingDoneSignal = new CountDownLatch(count)
+      log.info(s"Task incrementing TrainingDoneSignal to $count")
     }
   }
 

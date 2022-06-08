@@ -14,8 +14,9 @@ import org.apache.spark.sql._
 import scala.annotation.tailrec
 import scala.language.existentials
 
-class StreamingState(ctx: TrainingContext,
-                     dataset: LightGBMDataset) { // TODO make microBatchSize part of ctx
+case class StreamingState(ctx: TrainingContext,
+                          dataset: LightGBMDataset,
+                          partitionId: Int) {
   val numCols: Int = ctx.numCols
   val numInitScoreClasses: Int = ctx.numInitScoreClasses
   val microBatchSize: Int = ctx.microBatchSize
@@ -95,7 +96,9 @@ class StreamingState(ctx: TrainingContext,
   * Class for handling the execution of streaming-based Tasks on workers for each partition.
   */
 class StreamingPartitionTask extends BasePartitionTask {
-  def preparePartitionData(ctx: TrainingContext, inputRows: Iterator[Row], partitionId: Int): PartitionDataState = {
+  def preparePartitionDataInternal(ctx: TrainingContext,
+                                   inputRows: Iterator[Row],
+                                   partitionId: Int): PartitionDataState = {
 
     // Make sure isSparse is set with a value
     val rowIterator = if (!ctx.sharedState.isSparse.isDefined) {
@@ -120,22 +123,23 @@ class StreamingPartitionTask extends BasePartitionTask {
 
     // Now handle validation data, which we can make as 1 Dataset since we have a hardcoded array
     // TODO Consider moving this to shared state and only calculating on main executor task
-    val validationDataset = generateOptionalValidationDataset(ctx, partitionId)
+    val validationDataset = generateOptValidationDataset(ctx, partitionId)
 
     // streaming does not use data state (it stores intermediate results in the context shared state),
     // so just return a stub
     PartitionDataState(None, None, validationDataset)
   }
 
-  private def generateOptionalValidationDataset(ctx: TrainingContext, partitionId: Int): Option[LightGBMDataset] = {
-    if (ctx.hasValid) {
+  private def generateOptValidationDataset(ctx: TrainingContext, partitionId: Int): Option[LightGBMDataset] = {
+    if (ctx.shouldCreateValidationDataset()) {
       val validationData = ctx.validationData.get.value
       createDatasetChunks(ctx,
         validationData.toIterator,
         ctx.sharedState.validationDatasetState,
         partitionId,
         validationData.length)
-      val dataset: LightGBMDataset = ctx.sharedState.validationDatasetState.getSharedStreamingDatasets().head
+      val dataset: LightGBMDataset = ctx.sharedState.getSharedValidationDataset()
+      ctx.log.info(s"DEBUG get validation dataset id ${dataset.datasetPtr.toString}, size: ${dataset.numData()}")
 
       // Complete the dataset
       // TODO finalize design of this
@@ -153,12 +157,13 @@ class StreamingPartitionTask extends BasePartitionTask {
                           partitionId: Int,
                           chunkSize: Int): Unit = {
     // Generate the "empty" dataset
-    ctx.log.info(s"LightGBM task generating schema for empty dense dataset with $chunkSize rows")
+    val isSparse = ctx.sharedState.isSparse.get
+    ctx.log.info(s"LightGBM task creating Dataset in partition $partitionId, size $chunkSize, sparse: $isSparse")
     val dataset = getReferenceDataset(ctx, chunkSize)
 
     // Initialize state buffers, and load 1 dataset chunk.
     // If we run out of rows, the dataset is "partial", but that is tracked in the LightBGM layer as num_pushed_rows()
-    val state = new StreamingState(ctx, dataset)
+    val state = new StreamingState(ctx, dataset, partitionId)
     try {
       if (ctx.sharedState.isSparse.get)
         pushSparseMicroBatches(state, chunkSize, inputRows, 0)
@@ -175,6 +180,7 @@ class StreamingPartitionTask extends BasePartitionTask {
     // Ideally we'd always make 1 dataset, but this gives us the flexibility to be off a little for any reason.
     // Even 1 extra row will get its own dataset and then be coalesced later.
     if (inputRows.hasNext) {
+      ctx.log.info(s"LightGBM task creating more Datasets in partition $partitionId")
       createDatasetChunks(ctx, inputRows, sharedDatasetState, partitionId, chunkSize)
     }
   }
@@ -244,6 +250,8 @@ class StreamingPartitionTask extends BasePartitionTask {
 
       // might be more rows, so continue with tail recursion at next index
       pushSparseMicroBatches(state, maxNumRows, inputRows, startIndex + microBatchRowCount)
+    } else {
+      state.ctx.log.info(s"LightGBM pushed $startIndex in partition ${state.partitionId}")
     }
   }
 
@@ -319,65 +327,78 @@ class StreamingPartitionTask extends BasePartitionTask {
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
     // We have already calculated the validation Dataset in the preparation stage
-    if (forValidation) dataState.streamingValidationSet.get
+    if (forValidation) ctx.sharedState().getSharedValidationDataset()
     else getFinalTrainingDataset(ctx, partitionIndex)
   }
 
   protected def getFinalTrainingDataset(ctx: TrainingContext, partitionIndex: Int): LightGBMDataset = {
     if (ctx.useSingleDatasetMode)
-      getMergedTrainingDataset(ctx)
+      getExecutorTrainingDataset(ctx)
     else
       getPartitionTrainingDataset(ctx, partitionIndex)
   }
 
   protected def getPartitionTrainingDataset(ctx: TrainingContext, partitionIndex: Int): LightGBMDataset = {
-    ctx.log.info("getting partition dataset")
+    ctx.log.info(s"getting partition $partitionIndex dataset")
 
-    val partitionDataset = ctx.sharedState.datasetState.getSharedStreamingDatasetForPartition(partitionIndex)
+    val partitionDatasets = ctx.sharedState().datasetState.getSharedStreamingDatasets(partitionIndex)
+    val partitionDataset = getCoalescedDataset(ctx, partitionDatasets)
 
-    // TODO fix this for not using coalesce, just finalize the existing one (and handle >1 set?)
-    val totalNumRows = partitionDataset.numPushedData()
-    ctx.log.info(s"LightGBM task generating final dataset with $totalNumRows")
-    val dataset = getReferenceDataset(ctx, totalNumRows)
+    // Datasets are freed as part of coalescing, so remove them from the lists
+    ctx.sharedState.datasetState.clearSharedStreamingDatasets(partitionIndex)
 
-    val datasetNativePointers = new VoidPointerSwigArray(1)
-    datasetNativePointers.setItem(0, partitionDataset.datasetPtr)
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCoalesce(dataset.datasetPtr,
-      datasetNativePointers.array,
-      1),
-      "Dataset coalesce")
-
-    ctx.log.info("done getting final dataset")
-
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(partitionDataset.datasetPtr),
-      "Dataset free")
-
-    dataset
+    ctx.log.info("done getting final training dataset")
+    partitionDataset
   }
 
-  protected def getMergedTrainingDataset(ctx: TrainingContext): LightGBMDataset = {
+  protected def getExecutorTrainingDataset(ctx: TrainingContext): LightGBMDataset = {
     ctx.log.info("getting final single-node merged dataset")
 
     val allDatasets = ctx.sharedState.datasetState.getSharedStreamingDatasets()
+    val executorDataset = getCoalescedDataset(ctx, allDatasets)
 
-    // TODO optimize for 1 dataset? or use first as base?
+    // Datasets are freed as part of coalescing, so remove them from the lists
+    ctx.sharedState.datasetState.clearSharedStreamingDatasets()
 
-    val totalNumRows = allDatasets.map(d => d.numPushedData()).sum
-    ctx.log.info(s"LightGBM task generating final dataset with $totalNumRows")
-    val dataset = getReferenceDataset(ctx, totalNumRows)
+    ctx.log.info("done getting final training dataset")
+    executorDataset
+  }
 
-    val datasetNativePointers = new VoidPointerSwigArray(allDatasets.length)
-    allDatasets.zipWithIndex.foreach { case (ptr, i) => datasetNativePointers.setItem(i, ptr.datasetPtr) }
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCoalesce(dataset.datasetPtr,
-                                                            datasetNativePointers.array,
-                                                            allDatasets.length),
-                "Dataset coalesce")
+  /**
+    * Return a dataset that is a coalesced version of the input array
+    * If there is only 1 dataset and it is fully loaded, the method will optimized and return that one
+    * Note that input datasets not reused are freed at the native layer
+    * @param ctx The training context
+    * @param allDatasets The array of datasets to coalesce
+    * @return the coalesced dataset, which might be the input one if optimized
+    */
+  protected def getCoalescedDataset(ctx: TrainingContext,
+                                    allDatasets: Array[LightGBMDataset]): LightGBMDataset = {
+    val firstDataset = allDatasets(0)
+    val isFull = firstDataset.numData() == firstDataset.numPushedData()
 
-    ctx.log.info("done getting final dataset")
+    // If there is only 1 dataset and the size is already correct, we can just optimize and finish it
+    // This removes the need to copy the data (as done by coalesce)
+    if (allDatasets.length == 1 && isFull) {
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetMarkFinished(firstDataset.datasetPtr),
+        "Dataset free")
+      firstDataset
+    } else {
+      val totalNumRows = allDatasets.map(d => d.numPushedData()).sum
+      ctx.log.info(s"LightGBM task generating final dataset with $totalNumRows")
+      val coalescedDataset = getReferenceDataset(ctx, totalNumRows)
 
-    ctx.sharedState.datasetState.freeSharedStreamingDatasets()
+      val datasetNativePointers = new VoidPointerSwigArray(allDatasets.length)
+      allDatasets.zipWithIndex.foreach { case (ptr, i) => datasetNativePointers.setItem(i, ptr.datasetPtr) }
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCoalesce(coalescedDataset.datasetPtr,
+        datasetNativePointers.array,
+        allDatasets.length),
+        "Dataset coalesce")
 
-    dataset
+      allDatasets.foreach(ds => LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),
+        "Dataset free"))
+      coalescedDataset
+    }
   }
 
   private def getReferenceDataset(ctx: TrainingContext,

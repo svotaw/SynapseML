@@ -60,7 +60,20 @@ case class TrainingContext(batchIndex: Int,
   def sharedState(): SharedState = { sharedStateSingleton.get }
 
   def incrementArrayProcessedSignal(): Int = { sharedState.incrementArrayProcessedSignal(log) }
-  def incrementDoneSignal(): Unit = { sharedState.incrementDoneSignal(log) }
+  def incrementDataPrepDoneSignal(): Unit = { sharedState.incrementDataPrepDoneSignal(log) }
+  def incrementTrainingDoneSignal(): Unit = { sharedState.incrementTrainingDoneSignal(log) }
+
+  /** Determines if the current task should calculate the validation Dataset.
+    * Only 1 task per executor needs to do it, and first one to call this gets the assignment.
+    *
+    * @return True if the current task should create, false otherwise.
+    */
+  def shouldCreateValidationDataset(): Boolean = {
+    if (hasValid) {
+      sharedState().linkValidationDatasetWorker()
+      sharedState().validationDatasetWorker.get == LightGBMUtils.getTaskId
+    } else false
+  }
 
   def setLogger(logger: Logger): Unit = {
     log = logger;

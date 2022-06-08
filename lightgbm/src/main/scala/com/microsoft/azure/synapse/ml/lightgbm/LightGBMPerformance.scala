@@ -21,8 +21,8 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
   def markDataPreparationStop(): Unit = { dataPreparationStop = System.currentTimeMillis() }
   def markDatasetCreationStart(): Unit = { datasetCreationStart = System.currentTimeMillis() }
   def markDatasetCreationStop(): Unit = { datasetCreationStop = System.currentTimeMillis() }
-  def markValidationDatasetCreationStart(): Unit = { validationDatasetCreationStart = System.currentTimeMillis() }
-  def markValidationDatasetCreationStop(): Unit = { validationDatasetCreationStop = System.currentTimeMillis() }
+  def markValidationDatasetStart(): Unit = { validationDatasetCreationStart = System.currentTimeMillis() }
+  def markValidationDatasetStop(): Unit = { validationDatasetCreationStop = System.currentTimeMillis() }
   def markTrainingIterationsStart(): Unit = { trainingIterationsStart = System.currentTimeMillis() }
   def markTrainingIterationsStop(): Unit = { trainingIterationsStop = System.currentTimeMillis() }
   def markTaskEnd(): Unit = { endTime = System.currentTimeMillis() }

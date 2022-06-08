@@ -18,16 +18,17 @@ import java.net._
 private object TrainUtils extends Serializable {
 
   def createBooster(trainParams: BaseTrainParams,
-                    trainDatasetPtr: LightGBMDataset,
-                    validDatasetPtr: Option[LightGBMDataset]): LightGBMBooster = {
+                    trainDataset: LightGBMDataset,
+                    validDatasetOpt: Option[LightGBMDataset],
+                    log: Logger): LightGBMBooster = {
     // Create the booster
     val parameters = trainParams.toString()
-    val booster = new LightGBMBooster(trainDatasetPtr, parameters)
-    trainParams.generalParams.modelString.foreach { modelStr =>
+    val booster = new LightGBMBooster(trainDataset, parameters)
+     trainParams.generalParams.modelString.foreach { modelStr =>
       booster.mergeBooster(modelStr)
     }
-    validDatasetPtr.foreach { lgbmdataset =>
-      booster.addValidationDataset(lgbmdataset)
+    validDatasetOpt.foreach { dataset =>
+      booster.addValidationDataset(dataset)
     }
     booster
   }
@@ -125,6 +126,7 @@ private object TrainUtils extends Serializable {
 
   def updateOneIteration(state: PartitionTaskTrainingState): Unit = {
     try {
+      state.log.info("LightGBM running iteration: " + state.iteration + " with is finished: " + state.isFinished)
         val fobj = state.ctx.trainingParams.objectiveParams.fobj
         if (fobj.isDefined) {
           val isClassification = state.ctx.isClassification
@@ -134,7 +136,7 @@ private object TrainUtils extends Serializable {
         } else {
           state.isFinished = state.booster.updateOneIteration()
         }
-      state.log.info("LightGBM running iteration: " + state.iteration + " with is finished: " + state.isFinished)
+      state.log.info("LightGBM completed iteration: " + state.iteration + " with is finished: " + state.isFinished)
     } catch {
       case e: java.lang.Exception =>
         state.log.warn("LightGBM reached early termination on one task," +
