@@ -317,8 +317,8 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
   test("Performance testing") {
     // modify this test for getting some simple performance measures
     val dataset = taskDF
-    val measurementCount = 9
-    val executionModes = Array("bulk")  // streaming, bulk
+    val measurementCount = 3
+    val executionModes = Array("streaming")  // streaming, bulk
     val microBatchSizes = Array(100) // 1, 2, 4, 8, 16, 32, 100, 1000)
     val matrixTypes = Array("dense")  // dense, sparse, auto
     val useSingleDatasetModes = Array(true)
@@ -369,9 +369,14 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
       println(s"Overhead time, ${measurements(i).overheadTime}")
       println(s"Task total times, ${measurements(i).taskTotalTimes.mkString(",")}")
       println(s"Task overhead times, ${measurements(i).taskOverheadTimes().mkString(",")}")
+      println(s"Task initialization times, ${measurements(i).taskInitializationTimes().mkString(",")}")
+      println(s"Task library initialization times, ${measurements(i).taskLibraryInitializationTimes().mkString(",")}")
+      println(s"Task network initialization times, ${measurements(i).taskNetworkInitializationTimes().mkString(",")}")
       println(s"Task data preparation times, ${measurements(i).taskDataPreparationTimes.mkString(",")}")
+      println(s"Task dataset wait times, ${measurements(i).taskWaitTimes().mkString(",")}")
       println(s"Task dataset creation times, ${measurements(i).taskDatasetCreationTimes.mkString(",")}")
       println(s"Task training iteration times, ${measurements(i).taskTrainingIterationTimes.mkString(",")}")
+      println(s"Task cleanup times, ${measurements(i).taskCleanupTimes().mkString(",")}")
       println(s"** Completed Measurement $i")
     })
     println(s"***** Averaged results for $measurementCount runs")
@@ -391,14 +396,16 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     println(s"Median Overhead time, $median")
     var medianMax = getMedian(measurements.map(m => m.taskTotalTimes.max))
     println(s"Median-max Task total times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskOverheadTimes().max))
+    println(s"Median-max Task overhead times, $medianMax")
+    medianMax = getMedian(measurements.map(m => m.taskInitializationTimes().max))
+    println(s"Median-max Task initialization times, $medianMax")
     medianMax = getMedian(measurements.map(m => m.taskDataPreparationTimes.max))
     println(s"Median-max Task data preparation times, $medianMax")
     medianMax = getMedian(measurements.map(m => m.taskDatasetCreationTimes.max))
     println(s"Median-max Task dataset creation times, $medianMax")
     medianMax = getMedian(measurements.map(m => m.taskTrainingIterationTimes.max))
     println(s"Median-max Task training iteration times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskOverheadTimes().max))
-    println(s"Median-max Task overhead times, $medianMax")
   }
 
   def getMedian[T: Ordering](seq: Seq[T])(implicit conv: T => Float, f: Fractional[Float]): Float = {

@@ -381,12 +381,12 @@ class StreamingPartitionTask extends BasePartitionTask {
     // This removes the need to copy the data (as done by coalesce)
     if (allDatasets.length == 1 && isFull) {
       LightGBMUtils.validate(lightgbmlib.LGBM_DatasetMarkFinished(firstDataset.datasetPtr),
-        "Dataset free")
+        "Dataset mark finished")
       firstDataset
     } else {
       val totalNumRows = allDatasets.map(d => d.numPushedData()).sum
       ctx.log.info(s"LightGBM task generating final dataset with $totalNumRows")
-      val coalescedDataset = getReferenceDataset(ctx, totalNumRows)
+      val coalescedDataset = getReferenceDataset(ctx, totalNumRows, false)
 
       val datasetNativePointers = new VoidPointerSwigArray(allDatasets.length)
       allDatasets.zipWithIndex.foreach { case (ptr, i) => datasetNativePointers.setItem(i, ptr.datasetPtr) }
@@ -402,7 +402,8 @@ class StreamingPartitionTask extends BasePartitionTask {
   }
 
   private def getReferenceDataset(ctx: TrainingContext,
-                                  numRows: Long): LightGBMDataset = {
+                                  numRows: Long,
+                                  forStreaming: Boolean = true): LightGBMDataset = {
     // The definition is broadcast from Spark, so retrieve it
     val serializedDataset: Array[Byte] = ctx.serializedReferenceDataset.get.value
 
@@ -426,7 +427,13 @@ class StreamingPartitionTask extends BasePartitionTask {
         if (ctx.hasInitialScores) 1 else 0,
         if (ctx.hasValid) 1 else 0,
         ctx.numInitScoreClasses),
-      "Dataset create from reference")
+      "Dataset LGBM_DatasetInitMetadata")
+
+    if (forStreaming) {
+      LightGBMUtils.validate(
+        lightgbmlib.LGBM_DatasetSetWaitForManualFinish(datasetPtr, 1),
+        "Dataset LGBM_DatasetSetWaitForManualFinish")
+    }
 
     lightgbmlib.delete_voidpp(pointer)
     new LightGBMDataset(datasetPtr)
