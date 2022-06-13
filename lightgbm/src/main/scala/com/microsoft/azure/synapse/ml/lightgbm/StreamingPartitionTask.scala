@@ -414,21 +414,12 @@ class StreamingPartitionTask extends BasePartitionTask {
       lightgbmlib.LGBM_DatasetCreateFromSerializedReference(lightgbmlib.byte_to_voidp_ptr(nativeByteArray),
                                                             serializedDataset.length,
                                                             numRows,
+                                                            ctx.numInitScoreClasses,
                                                             ctx.datasetParams,
                                                             pointer),
       "Dataset create from reference")
 
     val datasetPtr = lightgbmlib.voidpp_value(pointer)
-
-    LightGBMUtils.validate(
-      lightgbmlib.LGBM_DatasetInitMetadata(datasetPtr,
-        numRows,
-        if (ctx.hasWeights) 1 else 0,
-        if (ctx.hasInitialScores) 1 else 0,
-        if (ctx.hasValid) 1 else 0,
-        ctx.numInitScoreClasses),
-      "Dataset LGBM_DatasetInitMetadata")
-
     if (forStreaming) {
       LightGBMUtils.validate(
         lightgbmlib.LGBM_DatasetSetWaitForManualFinish(datasetPtr, 1),
