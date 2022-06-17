@@ -21,14 +21,16 @@ class SharedDatasetState(columnParams: ColumnParams,
   val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
   val matrixType: String = trainParams.executionParams.matrixType
 
+  private val streamingPartitionDatasets = scala.collection.mutable.Map[Int, List[LightGBMDataset]]()
+
   lazy val denseAggregatedColumns: BaseDenseAggregatedColumns = new DenseSyncAggregatedColumns(chunkSize)
 
   lazy val sparseAggregatedColumns: BaseSparseAggregatedColumns = new SparseSyncAggregatedColumns(chunkSize)
 
-  def prep(iter: Iterator[Row]): BaseChunkedColumns = {
+  def prepBulk(iter: Iterator[Row]): BaseChunkedColumns = {
     val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) = getArrayType(iter, matrixType)
     val peekableIter = new PeekingIterator(concatRowsIter)
-    // Note: the first worker sets "is sparse", other workers read it
+    // Note: the first worker gets to officially set "is sparse", other workers read it
     sharedState.linkIsSparse(isSparseHere)
 
     if (!sharedState.isSparse.get) {
@@ -38,7 +40,7 @@ class SharedDatasetState(columnParams: ColumnParams,
     }
   }
 
-  def merge(ts: BaseChunkedColumns): BaseAggregatedColumns = {
+  def mergeBulk(ts: BaseChunkedColumns): BaseAggregatedColumns = {
     val isSparseVal = sharedState.isSparse.get
     val aggregatedColumns = if (!isSparseVal) {
       if (useSingleDataset) denseAggregatedColumns
@@ -77,6 +79,22 @@ class SharedDatasetState(columnParams: ColumnParams,
     }
   }
 
+  def addStreamingDataset(partition: Int, dataset: LightGBMDataset): Unit = {
+    this.synchronized {
+      if (streamingPartitionDatasets.contains(partition)) {
+        val currentList = streamingPartitionDatasets(partition)
+        streamingPartitionDatasets.update(partition, dataset +: currentList)
+      } else {
+        streamingPartitionDatasets += partition -> List(dataset)
+      }
+    }
+  }
+
+  def getSharedStreamingDatasets(): Array[LightGBMDataset] =
+  {
+    streamingPartitionDatasets.flatten(pair => pair._2).toArray
+  }
+
   def getArrayType(rowsIter: Iterator[Row], matrixType: String): (Iterator[Row], Boolean) = {
     if (matrixType == "auto") {
       sampleRowsForArrayType(rowsIter, columnParams)
@@ -93,9 +111,9 @@ class SharedDatasetState(columnParams: ColumnParams,
 class SharedState(columnParams: ColumnParams,
                   schema: StructType,
                   trainParams: BaseTrainParams) {
-  val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
-  val chunkSize: Int = trainParams.executionParams.chunkSize
-  val matrixType: String = trainParams.executionParams.matrixType
+  //val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
+  //val chunkSize: Int = trainParams.executionParams.chunkSize
+  //val matrixType: String = trainParams.executionParams.matrixType
 
   val datasetState: SharedDatasetState = new SharedDatasetState(
     columnParams,

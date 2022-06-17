@@ -3,16 +3,7 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm.swig
 
-import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double,
-  SWIGTYPE_p_float,
-  SWIGTYPE_p_int,
-  SWIGTYPE_p_long,
-  SWIGTYPE_p_p_double,
-  SWIGTYPE_p_p_int,
-  doubleChunkedArray,
-  floatChunkedArray,
-  int32ChunkedArray,
-  lightgbmlib}
+import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_long, SWIGTYPE_p_p_double, SWIGTYPE_p_p_int, SWIGTYPE_p_unsigned_char, doubleChunkedArray, floatChunkedArray, int32ChunkedArray, lightgbmlib}
 
 object SwigUtils extends Serializable {
   /** Converts a native double array to a Java array using SWIG.
@@ -36,10 +27,10 @@ object SwigUtils extends Serializable {
     colArray
   }
 
-  def byteArrayToNative(array: Array[Byte]): SWIGTYPE_p_byte = {
+  def byteArrayToNative(array: Array[Byte]): SWIGTYPE_p_unsigned_char = {
     val colArray = lightgbmlib.new_byteArray(array.length)
     array.zipWithIndex.foreach(ri =>
-      lightgbmlib.byteArray_setitem(colArray, ri._2.toLong, ri._1.toFloat))
+      lightgbmlib.byteArray_setitem(colArray, ri._2.toLong, ri._1.toShort))
     colArray
   }
 }

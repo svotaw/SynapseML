@@ -5,7 +5,10 @@ package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
 import com.microsoft.azure.synapse.ml.lightgbm.params.{
-  LightGBMModelParams, LightGBMPredictionParams, RankerTrainParams, BaseTrainParams}
+  BaseTrainParams,
+  LightGBMModelParams,
+  LightGBMPredictionParams,
+  RankerTrainParams}
 import com.microsoft.azure.synapse.ml.logging.BasicLogging
 import org.apache.spark.ml.linalg.Vector
 import org.apache.spark.ml.param._
@@ -13,6 +16,7 @@ import org.apache.spark.ml.util._
 import org.apache.spark.ml.{ComplexParamsReadable, ComplexParamsWritable, Ranker, RankerModel}
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions.{col, udf}
+import org.apache.spark.sql.types.StructField
 
 object LightGBMRanker extends DefaultParamsReadable[LightGBMRanker]
 
@@ -47,7 +51,7 @@ class LightGBMRanker(override val uid: String)
   def getEvalAt: Array[Int] = $(evalAt)
   def setEvalAt(value: Array[Int]): this.type = set(evalAt, value)
 
-  def getTrainParams(numTasks: Int, dataset: Dataset[_], numTasksPerExec: Int): BaseTrainParams = {
+  def getTrainParams(numTasks: Int, featuresSchema: StructField, numTasksPerExec: Int): BaseTrainParams = {
     RankerTrainParams(
       get(passThroughArgs),
       getMaxPosition,
@@ -55,7 +59,7 @@ class LightGBMRanker(override val uid: String)
       getEvalAt,
       get(isProvideTrainingMetric),
       getDelegate,
-      getGeneralParams(numTasks, dataset),
+      getGeneralParams(numTasks, featuresSchema),
       getDatasetParams,
       getDartParams,
       getExecutionParams(numTasksPerExec),

@@ -59,8 +59,8 @@ trait LightGBMExecutionParams extends Wrappable {
 
   val executionMode = new Param[String](this, "executionMode",
     "Specify how LightGBM is executed.  " +
-      "Values can be twopass, onepass.")
-  setDefault(executionMode -> "twopass")
+      "Values can be streaming, bulk.")
+  setDefault(executionMode -> "streaming")
   def getExecutionMode: String = $(executionMode)
   def setExecutionMode(value: String): this.type = set(executionMode, value)
 
