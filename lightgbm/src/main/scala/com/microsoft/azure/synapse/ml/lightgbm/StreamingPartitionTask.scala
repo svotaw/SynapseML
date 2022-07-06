@@ -4,38 +4,41 @@
 package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils.getArrayType
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{LightGBMDataset, SampledData}
 import com.microsoft.azure.synapse.ml.lightgbm.swig._
 import com.microsoft.ml.lightgbm._
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.sql._
+import org.apache.spark.sql.types.StructType
 
 import scala.annotation.tailrec
 import scala.language.existentials
 
-case class StreamingState(ctx: TrainingContext,
-                          dataset: LightGBMDataset,
-                          partitionId: Int) {
-  val numCols: Int = ctx.numCols
-  val numInitScoreClasses: Int = ctx.numInitScoreClasses
-  val microBatchSize: Int = ctx.microBatchSize
+case class StreamingState(ctx: PartitionTaskContext,
+                          dataset: LightGBMDataset) {
+  val trainingCtx: TrainingContext = ctx.trainingCtx
+  val columnParams: ColumnParams = trainingCtx.columnParams
+  val schema: StructType = trainingCtx.schema
+  val numCols: Int = trainingCtx.numCols
+  val numInitScoreClasses: Int = trainingCtx.numInitScoreClasses
+  val microBatchSize: Int = trainingCtx.microBatchSize
 
   val isSparse: Boolean = ctx.sharedState.isSparse.get
   val isDense: Boolean = !isSparse
-  val hasWeights: Boolean = ctx.hasWeights
-  val hasInitialScores: Boolean = ctx.hasInitialScores
-  val hasGroups: Boolean = ctx.hasGroups
+  val hasWeights: Boolean = trainingCtx.hasWeights
+  val hasInitialScores: Boolean = trainingCtx.hasInitialScores
+  val hasGroups: Boolean = trainingCtx.hasGroups
 
   /* Buffers for holding micro-batch data */
 
   // dense data
-  lazy val featureDataBuffer: DoubleSwigArray = new DoubleSwigArray(microBatchSize * ctx.numCols)
+  lazy val featureDataBuffer: DoubleSwigArray = new DoubleSwigArray(microBatchSize * numCols)
 
   // sparse data
   lazy val indptrBuffer: IntSwigArray = new IntSwigArray(microBatchSize + 1)
-  lazy val indicesBuffer: IntSwigArray = new IntSwigArray(microBatchSize * ctx.numCols) // allocate max space
-  lazy val valBuffer: DoubleSwigArray = new DoubleSwigArray(microBatchSize * ctx.numCols) // allocate max space
+  lazy val indicesBuffer: IntSwigArray = new IntSwigArray(microBatchSize * numCols) // allocate max space
+  lazy val valBuffer: DoubleSwigArray = new DoubleSwigArray(microBatchSize * numCols) // allocate max space
 
   // metadata
   val labelBuffer: FloatSwigArray = new FloatSwigArray(microBatchSize)
@@ -45,34 +48,34 @@ case class StreamingState(ctx: TrainingContext,
 
   val datasetPointer: SWIGTYPE_p_void = dataset.datasetPtr
   val featureDataPtr: SWIGTYPE_p_void  =
-    if (isSparse) null
+    if (isSparse) null  // scalastyle:ignore null
     else lightgbmlib.double_to_voidp_ptr(featureDataBuffer.array)
   val indptrPtr: SWIGTYPE_p_void  =
-    if (isDense) null
+    if (isDense) null  // scalastyle:ignore null
     else lightgbmlib.int_to_voidp_ptr(indptrBuffer.array)
   val indicesPtr: SWIGTYPE_p_int  =
-    if (isDense) null
+    if (isDense) null  // scalastyle:ignore null
     else indicesBuffer.array
   val valPtr: SWIGTYPE_p_void  =
-    if (isDense) null
+    if (isDense) null  // scalastyle:ignore null
     else lightgbmlib.double_to_voidp_ptr(valBuffer.array)
 
   val labelPtr: SWIGTYPE_p_float = labelBuffer.array
   val weightPtr: SWIGTYPE_p_float =
     if (hasWeights) weightBuffer.array
-    else null
+    else null  // scalastyle:ignore null
   val initScorePtr: SWIGTYPE_p_double =
     if (hasInitialScores) initScoreBuffer.array
-    else null
+    else null  // scalastyle:ignore null
   val groupPtr: SWIGTYPE_p_int =
     if (hasGroups) groupBuffer.array
-    else null
+    else null  // scalastyle:ignore null
 
-  val featureIndex: Int = ctx.schema.fieldIndex(ctx.columnParams.featuresColumn)
-  val labelIndex: Int = ctx.schema.fieldIndex(ctx.columnParams.labelColumn)
-  val weightIndex: Int = if (hasWeights) ctx.schema.fieldIndex(ctx.columnParams.weightColumn.get) else 0
-  val initScoreIndex: Int = if (hasInitialScores) ctx.schema.fieldIndex(ctx.columnParams.initScoreColumn.get) else 0
-  val groupIndex: Int = if (hasGroups) ctx.schema.fieldIndex(ctx.columnParams.groupColumn.get) else 0
+  val featureIndex: Int = schema.fieldIndex(columnParams.featuresColumn)
+  val labelIndex: Int = schema.fieldIndex(columnParams.labelColumn)
+  val weightIndex: Int = if (hasWeights) schema.fieldIndex(columnParams.weightColumn.get) else 0
+  val initScoreIndex: Int = if (hasInitialScores) schema.fieldIndex(columnParams.initScoreColumn.get) else 0
+  val groupIndex: Int = if (hasGroups) schema.fieldIndex(columnParams.groupColumn.get) else 0
 
   if (isSparse) indptrBuffer.setItem(0, 0)  // every micro-batch starts with index 0
 
@@ -96,74 +99,149 @@ case class StreamingState(ctx: TrainingContext,
   * Class for handling the execution of streaming-based Tasks on workers for each partition.
   */
 class StreamingPartitionTask extends BasePartitionTask {
-  def preparePartitionDataInternal(ctx: TrainingContext,
-                                   inputRows: Iterator[Row],
-                                   partitionId: Int): PartitionDataState = {
+  override protected def initializeInternal(ctx: PartitionTaskContext): PartitionTaskContext = {
+    val shouldCalcValidationData =
+      if (ctx.trainingCtx.hasValidationData) {
+        ctx.sharedState.linkValidationDatasetWorker()
+        ctx.sharedState.validationDatasetWorker.get == LightGBMUtils.getTaskId
+      } else false
+
+    // Update the row count for the tasks in this executor
+    val rowCount = ctx.trainingCtx.partitionCounts.get(ctx.partitionId)
+    ctx.sharedState.datasetState.streamingRowCounts.update(ctx.partitionId, rowCount)
+
+    // Streaming always uses 1 Dataset per executor, so we need to add to synchronization stop
+    if (!ctx.isMainWorker) ctx.sharedState.incrementDataPrepDoneSignal(ctx.log)
+
+    ctx.setShouldCalcValidationData(shouldCalcValidationData)
+  }
+
+  protected def preparePartitionDataInternal(ctx: PartitionTaskContext,
+                                             inputRows: Iterator[Row]): PartitionDataState = {
+    // If this is the task that will execute training, first create the empty Dataset from sampled data
+    if (ctx.shouldExecuteTraining) {
+      ctx.sharedState.datasetState.streamingDataset = Option(createSharedExecutorDataset(ctx))
+      ctx.sharedState.helperStartSignal.countDown()
+    } else {
+      // This must be a task that just loads data and exits, so wait for the shared Dataset to be created
+      ctx.sharedState.helperStartSignal.await()
+    }
 
     // Make sure isSparse is set with a value
-    val rowIterator = if (!ctx.sharedState.isSparse.isDefined) {
+    val rowIterator = if (ctx.sharedState.isSparse.isEmpty) {
       val (newRowsIter: Iterator[Row], isSparseHere: Boolean) =
-        getArrayType(inputRows, ctx.trainingParams.executionParams.matrixType, ctx.columnParams.featuresColumn)
+        getArrayType(inputRows,
+          ctx.trainingCtx.trainingParams.executionParams.matrixType,
+          ctx.trainingCtx.columnParams.featuresColumn)
       ctx.sharedState.linkIsSparse(isSparseHere)
       newRowsIter
     } else inputRows
 
-    val numPartitionRows: Long = ctx.partitionCounts.get(partitionId)
+    insertRowsIntoTrainingDataset(ctx, rowIterator)
 
-    // TODO For now, use precalculated partition count to just force 1 chunk per partition
-    val chunkSize: Int = numPartitionRows.toInt
-
-    // We turn the inputRows into a set of "chunks", where each chunk is stored as 1 dataset.
-    // These dataset chunks will later be coalesced into 1 dataset per worker for useSingleDataset mode,
-    // or 1 dataset per partition otherwise.
-    // Ideally we'd create 1 dataset per partition, but allowing multiple gives us flexibility.
-    createDatasetChunks(ctx, rowIterator, ctx.sharedState.datasetState, partitionId, chunkSize)
-
-    ctx.log.info("created dataset chunks")
-
-    // Now handle validation data, which we can make as 1 Dataset since we have a hardcoded array
-    // TODO Consider moving this to shared state and only calculating on main executor task
-    val validationDataset = generateOptValidationDataset(ctx, partitionId)
+    // Now handle validation data, which comes from a broadcast-ed hardcoded array
+    if (ctx.shouldCalcValidationDataset) {
+      ctx.sharedState.validationDatasetState.streamingDataset = Option(generateOptValidationDataset(ctx))
+    }
 
     // streaming does not use data state (it stores intermediate results in the context shared state),
     // so just return a stub
-    PartitionDataState(None, None, validationDataset)
+    PartitionDataState(None, None)
   }
 
-  private def generateOptValidationDataset(ctx: TrainingContext, partitionId: Int): Option[LightGBMDataset] = {
-    if (ctx.shouldCreateValidationDataset()) {
-      val validationData = ctx.validationData.get.value
-      createDatasetChunks(ctx,
-        validationData.toIterator,
-        ctx.sharedState.validationDatasetState,
-        partitionId,
-        validationData.length)
-      val dataset: LightGBMDataset = ctx.sharedState.getSharedValidationDataset()
-      ctx.log.info(s"DEBUG get validation dataset id ${dataset.datasetPtr.toString}, size: ${dataset.numData()}")
-
-      // Complete the dataset
-      // TODO finalize design of this
+  protected def generateFinalDatasetInternal(ctx: PartitionTaskContext,
+                                             dataState: PartitionDataState,
+                                             forValidation: Boolean,
+                                             referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
+    // We have already calculated and finished the validation Dataset in the preparation stage
+    if (forValidation) ctx.sharedState.validationDatasetState.streamingDataset.get
+    else {
+      val dataset = ctx.sharedState.datasetState.streamingDataset.get
       LightGBMUtils.validate(lightgbmlib.LGBM_DatasetMarkFinished(dataset.datasetPtr),
         "Dataset mark finished")
-      Option(dataset)
+      dataset
     }
-    else None
   }
 
+  /** Cleanup the task
+    *
+    * @param ctx The task context.
+    */
+  protected override def cleanupInternal(ctx: PartitionTaskContext): Unit = {
+    /*if (ctx.shouldExecuteTraining) {
+      ctx.log.info(s"Freeing Datasets (in partition ${ctx.partitionId})")
+      ctx.sharedState.datasetState.streamingDataset.foreach(ds =>
+        LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),
+        "Dataset free"))
+
+      ctx.sharedState.validationDatasetState.streamingDataset.foreach(ds =>
+        LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),
+          "Validation dataset free"))
+    }*/
+  }
+
+  private def generateOptValidationDataset(ctx: PartitionTaskContext): LightGBMDataset = {
+    val validationData = ctx.trainingCtx.validationData.get.value
+
+    val validationDataset = createSharedValidationDataset(ctx, validationData.length)
+
+    insertRowsIntoDataset(
+      ctx,
+      validationDataset,
+      validationData.toIterator,
+      0,
+      validationData.length)
+
+    // Complete the dataset here since we only add data to it once
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetMarkFinished(validationDataset.datasetPtr),
+      "Dataset mark finished")
+    validationDataset
+  }
+
+  private def insertRowsIntoTrainingDataset(ctx: PartitionTaskContext, inputRows: Iterator[Row]): Unit = {
+    val partitionRowCount = ctx.trainingCtx.partitionCounts.get(ctx.partitionId).toInt
+    val partitionRowOffset = ctx.streamingPartitionOffset
+    val isSparse = ctx.sharedState.isSparse.get
+    ctx.log.info(s"Inserting rows into training Dataset from partition ${ctx.partitionId}, " +
+      s"size $partitionRowCount, offset: $partitionRowOffset, sparse: $isSparse")
+    val dataset = ctx.sharedState.datasetState.streamingDataset.get
+
+    insertRowsIntoDataset(ctx, dataset, inputRows, partitionRowOffset, partitionRowOffset + partitionRowCount)
+
+    ctx.log.info(s"inserted $partitionRowCount partition ${ctx.partitionId} " +
+      s"rows into shared training dataset at offset $partitionRowOffset")
+  }
+
+  private def insertRowsIntoDataset(ctx: PartitionTaskContext,
+                                    dataset: LightGBMDataset,
+                                    inputRows: Iterator[Row],
+                                    startIndex: Int,
+                                    stopIndex: Int): Unit = {
+    val state = StreamingState(ctx, dataset)
+    try {
+      if (ctx.sharedState.isSparse.get)
+        pushSparseMicroBatches(state, inputRows, startIndex, stopIndex)
+      else
+        pushDenseMicroBatches(state, inputRows, startIndex, stopIndex)
+    } finally {
+      state.delete()
+    }
+  }
+
+  /* TODO decide fate of this method
   @tailrec
-  private def createDatasetChunks(ctx: TrainingContext,
-                          inputRows: Iterator[Row],
-                          sharedDatasetState: SharedDatasetState,
-                          partitionId: Int,
-                          chunkSize: Int): Unit = {
+  private def createDatasetChunks(ctx: PartitionTaskContext,
+                                  inputRows: Iterator[Row],
+                                  sharedDatasetState: SharedDatasetState,
+                                  chunkSize: Int): Unit = {
     // Generate the "empty" dataset
     val isSparse = ctx.sharedState.isSparse.get
-    ctx.log.info(s"LightGBM task creating Dataset in partition $partitionId, size $chunkSize, sparse: $isSparse")
+    ctx.log.info(s"LightGBM task creating Dataset in partition ${ctx.partitionId}, size $chunkSize, sparse: $isSparse")
     val dataset = getReferenceDataset(ctx, chunkSize)
 
     // Initialize state buffers, and load 1 dataset chunk.
     // If we run out of rows, the dataset is "partial", but that is tracked in the LightBGM layer as num_pushed_rows()
-    val state = new StreamingState(ctx, dataset, partitionId)
+    val state = StreamingState(ctx, dataset)
     try {
       if (ctx.sharedState.isSparse.get)
         pushSparseMicroBatches(state, chunkSize, inputRows, 0)
@@ -174,28 +252,29 @@ class StreamingPartitionTask extends BasePartitionTask {
     }
 
     // Now store it in the shared state for use later by whatever thread will make the final dataset used for training
-    sharedDatasetState.addStreamingDataset(partitionId, dataset)
+    sharedDatasetState.addStreamingDataset(ctx.partitionId, dataset)
 
     // If there are still more rows in the partition, create another dataset.
     // Ideally we'd always make 1 dataset, but this gives us the flexibility to be off a little for any reason.
     // Even 1 extra row will get its own dataset and then be coalesced later.
     if (inputRows.hasNext) {
-      ctx.log.info(s"LightGBM task creating more Datasets in partition $partitionId")
-      createDatasetChunks(ctx, inputRows, sharedDatasetState, partitionId, chunkSize)
+      ctx.log.info(s"LightGBM task creating more Datasets in partition ${ctx.partitionId}")
+      createDatasetChunks(ctx, inputRows, sharedDatasetState, chunkSize)
     }
-  }
+  } */
 
   @tailrec
   private def pushDenseMicroBatches(state: StreamingState,
-                            maxNumRows: Int,
-                            inputRows: Iterator[Row],
-                            startIndex: Int): Unit = {
+                                    inputRows: Iterator[Row],
+                                    startIndex: Int,
+                                    stopIndex: Int): Unit = {
     // Account for stopping early due to partial micro-batch
-    val maxBatchSize = Math.min(state.microBatchSize, maxNumRows - startIndex)
+    val maxBatchSize = Math.min(state.microBatchSize, stopIndex - startIndex)
     val count =
       if (maxBatchSize == 0) 0
       else loadOneDenseMicroBatchBuffer(state, inputRows, 0, maxBatchSize)
     if (count > 0) {
+      state.ctx.log.info(s"Pushing $count rows at $startIndex")
       LightGBMUtils.validate(lightgbmlib.LGBM_DatasetPushRowsWithMetadata(
         state.datasetPointer,
         state.featureDataPtr,
@@ -209,17 +288,17 @@ class StreamingPartitionTask extends BasePartitionTask {
         state.groupPtr), "Dataset push dense micro-batch")
 
       // might be more rows, so continue with tail recursion at next index
-      pushDenseMicroBatches(state, maxNumRows, inputRows, startIndex + count)
+      pushDenseMicroBatches(state, inputRows, startIndex + count, stopIndex)
     }
   }
 
   @tailrec
   private def pushSparseMicroBatches(state: StreamingState,
-                             maxNumRows: Int,
-                             inputRows: Iterator[Row],
-                             startIndex: Int): Unit = {
+                                     inputRows: Iterator[Row],
+                                     startIndex: Int,
+                                     stopIndex: Int): Unit = {
     // Account for stopping early due to partial micro-batch
-    val maxBatchSize = Math.min(state.microBatchSize, maxNumRows - startIndex)
+    val maxBatchSize = Math.min(state.microBatchSize, stopIndex - startIndex)
     val (microBatchRowCount: Int, microBatchElementCount: Int) =
       if (maxBatchSize == 0) (0, 0)
       else loadOneSparseMicroBatchBuffer(state, inputRows, 0, 0, maxBatchSize)
@@ -230,7 +309,7 @@ class StreamingPartitionTask extends BasePartitionTask {
         (1 until state.numInitScoreClasses).foreach { i =>
           (0 until microBatchRowCount).foreach { j => {
             val score = state.initScoreBuffer.getItem(i * state.microBatchSize + j)
-            state.initScoreBuffer.setItem( i * microBatchRowCount + j, score)}}
+            state.initScoreBuffer.setItem(i * microBatchRowCount + j, score)}}
         }
       }
       LightGBMUtils.validate(lightgbmlib.LGBM_DatasetPushRowsByCSRWithMetadata(
@@ -249,32 +328,34 @@ class StreamingPartitionTask extends BasePartitionTask {
         state.groupPtr), "Dataset push CSR micro-batch")
 
       // might be more rows, so continue with tail recursion at next index
-      pushSparseMicroBatches(state, maxNumRows, inputRows, startIndex + microBatchRowCount)
+      pushSparseMicroBatches(state, inputRows, startIndex + microBatchRowCount, stopIndex)
     } else {
-      state.ctx.log.info(s"LightGBM pushed $startIndex in partition ${state.partitionId}")
+      state.ctx.log.info(s"LightGBM pushed $startIndex in partition ${state.ctx.partitionId}")
     }
   }
 
   @tailrec
   private def loadOneDenseMicroBatchBuffer(state: StreamingState,
-                                   inputRows: Iterator[Row],
-                                   count: Int,
-                                   maxBatchCount: Int): Int = {
-    if (inputRows.hasNext && count < maxBatchCount) {
+                                           inputRows: Iterator[Row],
+                                           currentCount: Int,
+                                           maxBatchCount: Int): Int = {
+    if (inputRows.hasNext && currentCount < maxBatchCount) {
+      // TODO state.ctx.log.info(s"Loading micro-batch: $currentCount row of $maxBatchCount rows")
       val row = inputRows.next()
       // Each row might be either sparse or dense, so convert to overall dense format
       row.getAs[Any](state.featureIndex) match {
         case dense: DenseVector => dense.values.zipWithIndex.foreach { case (x, i) =>
-          state.featureDataBuffer.setItem(count * state.numCols + i, x) }
+          state.featureDataBuffer.setItem(currentCount * state.numCols + i, x) }
         case sparse: SparseVector => sparse.toArray.zipWithIndex.foreach { case (x, i) =>
-          state.featureDataBuffer.setItem(count * state.numCols + i, x) }
+          state.featureDataBuffer.setItem(currentCount * state.numCols + i, x) }
       }
 
-      loadOneMetadataRow(state, row, count)
+      // TODO state.ctx.log.info(s"Loading metadata micro-batch: $currentCount row of $maxBatchCount rows")
+      loadOneMetadataRow(state, row, currentCount)
 
       // We have not reached the end of the micro-batch or Rows, so continue with tail recursion
-      loadOneDenseMicroBatchBuffer(state, inputRows, count + 1, maxBatchCount)
-    } else count
+      loadOneDenseMicroBatchBuffer(state, inputRows, currentCount + 1, maxBatchCount)
+    } else currentCount
   }
 
   @tailrec
@@ -321,16 +402,7 @@ class StreamingPartitionTask extends BasePartitionTask {
     }
   }
 
-  protected def generateFinalDatasetInternal(ctx: TrainingContext,
-                                             dataState: PartitionDataState,
-                                             partitionIndex: Int,
-                                             forValidation: Boolean,
-                                             referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
-    // We have already calculated the validation Dataset in the preparation stage
-    if (forValidation) ctx.sharedState().getSharedValidationDataset()
-    else getFinalTrainingDataset(ctx, partitionIndex)
-  }
-
+  /* TODO decide fate
   protected def getFinalTrainingDataset(ctx: TrainingContext, partitionIndex: Int): LightGBMDataset = {
     if (ctx.useSingleDatasetMode)
       getExecutorTrainingDataset(ctx)
@@ -349,9 +421,10 @@ class StreamingPartitionTask extends BasePartitionTask {
 
     ctx.log.info("done getting final training dataset")
     partitionDataset
-  }
+  } */
 
-  protected def getExecutorTrainingDataset(ctx: TrainingContext): LightGBMDataset = {
+
+  /* TODO decide fate of this method protected def getExecutorTrainingDataset(ctx: TrainingContext): LightGBMDataset = {
     ctx.log.info("getting final single-node merged dataset")
 
     val allDatasets = ctx.sharedState.datasetState.getSharedStreamingDatasets()
@@ -362,7 +435,7 @@ class StreamingPartitionTask extends BasePartitionTask {
 
     ctx.log.info("done getting final training dataset")
     executorDataset
-  }
+  } */
 
   /**
     * Return a dataset that is a coalesced version of the input array
@@ -372,7 +445,7 @@ class StreamingPartitionTask extends BasePartitionTask {
     * @param allDatasets The array of datasets to coalesce
     * @return the coalesced dataset, which might be the input one if optimized
     */
-  protected def getCoalescedDataset(ctx: TrainingContext,
+  /* TODO decide fate of this method  protected def getCoalescedDataset(ctx: TrainingContext,
                                     allDatasets: Array[LightGBMDataset]): LightGBMDataset = {
     val firstDataset = allDatasets(0)
     val isFull = firstDataset.numData() == firstDataset.numPushedData()
@@ -399,11 +472,11 @@ class StreamingPartitionTask extends BasePartitionTask {
         "Dataset free"))
       coalescedDataset
     }
-  }
+  }*/
 
+  /* TODO decide fate of this
   private def getReferenceDataset(ctx: TrainingContext,
-                                  numRows: Long,
-                                  forStreaming: Boolean = true): LightGBMDataset = {
+                                  numRows: Long): LightGBMDataset = {
     // The definition is broadcast from Spark, so retrieve it
     val serializedDataset: Array[Byte] = ctx.serializedReferenceDataset.get.value
 
@@ -420,11 +493,78 @@ class StreamingPartitionTask extends BasePartitionTask {
       "Dataset create from reference")
 
     val datasetPtr = lightgbmlib.voidpp_value(pointer)
-    if (forStreaming) {
+    LightGBMUtils.validate(
+      lightgbmlib.LGBM_DatasetSetWaitForManualFinish(datasetPtr, 1),
+      "Dataset LGBM_DatasetSetWaitForManualFinish")
+
+    lightgbmlib.delete_voidpp(pointer)
+    new LightGBMDataset(datasetPtr)
+  } */
+
+  private def createSharedExecutorDataset(ctx: PartitionTaskContext): LightGBMDataset = {
+    // The sample data is broadcast from Spark, so retrieve it
+    ctx.measures.markSamplingStart()
+    val numRows = ctx.streamingExecutorRowCount
+    val sampledRowData = ctx.trainingCtx.broadcastedSampleData.get.value
+
+    // create properly formatted sampled data
+    ctx.log.info(s"Creating sample data with ${sampledRowData.length} samples")
+    val datasetVoidPtr = lightgbmlib.voidpp_handle()
+    val sampledData: SampledData = new SampledData(sampledRowData.length, ctx.trainingCtx.numCols)
+    try {
+      sampledRowData.zipWithIndex.foreach(rowAndIndex =>
+        sampledData.pushRow(rowAndIndex._1, rowAndIndex._2, ctx.trainingCtx.columnParams.featuresColumn))
+      ctx.measures.markSamplingStop()
+
+      // Convert byte array to native memory
+      ctx.log.info(s"Creating empty dense training dataset with $numRows rows, config:${ctx.trainingCtx.datasetParams}")
+      // Generate the dataset for features
+      val datasetVoidPtr = lightgbmlib.voidpp_handle()
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetCreateFromSampledColumn(
+        sampledData.getSampleData,
+        sampledData.getSampleIndices,
+        ctx.trainingCtx.numCols,
+        sampledData.getRowCounts,
+        sampledData.numRows,
+        numRows.toInt, // TODO this limits Dataset size to int?
+        ctx.trainingCtx.datasetParams,
+        datasetVoidPtr), "Dataset create")
+
+      val datasetPtr: SWIGTYPE_p_void = lightgbmlib.voidpp_value(datasetVoidPtr)
       LightGBMUtils.validate(
         lightgbmlib.LGBM_DatasetSetWaitForManualFinish(datasetPtr, 1),
         "Dataset LGBM_DatasetSetWaitForManualFinish")
+
+      val intPtr = lightgbmlib.new_intp()
+      val resultCode2 =
+        lightgbmlib.LGBM_DatasetGetNumData(lightgbmlib.voidpp_value(datasetVoidPtr), intPtr)
+      ctx.log.info(s"DEBUG  Result code for LGBM_DatasetGetNumData: $resultCode2")
+      val datasetCount = lightgbmlib.intp_value(intPtr)
+      ctx.log.info(s"DEBUG  Count: $datasetCount")
+      lightgbmlib.delete_intp(intPtr)
+
+      /* LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr),
+        "Dataset free")
+      ctx.log.info(s"DEBUG  Freed Dataset") */
+
+      new LightGBMDataset(datasetPtr)
+    } finally {
+      sampledData.delete()
+      lightgbmlib.delete_voidpp(datasetVoidPtr)
     }
+  }
+
+  private def createSharedValidationDataset(ctx: PartitionTaskContext, rowCount: Int): LightGBMDataset = {
+    val pointer = lightgbmlib.voidpp_handle()
+    val reference = ctx.sharedState.datasetState.streamingDataset.get.datasetPtr
+    LightGBMUtils.validate(
+      lightgbmlib.LGBM_DatasetCreateByReference(reference, rowCount, pointer),
+      "Dataset create from reference")
+
+    val datasetPtr = lightgbmlib.voidpp_value(pointer)
+    LightGBMUtils.validate(
+      lightgbmlib.LGBM_DatasetSetWaitForManualFinish(datasetPtr, 1),
+      "Dataset LGBM_DatasetSetWaitForManualFinish")
 
     lightgbmlib.delete_voidpp(pointer)
     new LightGBMDataset(datasetPtr)

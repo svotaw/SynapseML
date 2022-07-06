@@ -273,7 +273,7 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     // TODO How does this make fresh copy?
     val measuredModel = baseModel.setUseSingleDatasetMode(false).setExecutionMode("streaming").setMatrixType("dense")
     val _ = measuredModel.fit(train)
-    val measuresOpt =  measuredModel.getPerformanceMeasures()
+    val measuresOpt =  measuredModel.getPerformanceMeasures
 
     assert(measuresOpt.isDefined)
     val measures = measuresOpt.get
@@ -306,7 +306,7 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     // TODO assert(taskTrainingIterationTimes.sum > 0)
     println(s"Task training iteration times: ${taskTrainingIterationTimes.mkString(",")}")
 
-    val tasks = measures.getTaskMeasures()
+    val tasks = measures.getTaskMeasures
     val activeTasks = tasks.filter(t => t.isActiveTrainingTask).map(t => t.partitionId)
     println(s"Active task ids: ${activeTasks.mkString(",")}")
 
@@ -317,9 +317,9 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
   test("Performance testing") {
     // modify this test for getting some simple performance measures
     val dataset = taskDF
-    val measurementCount = 3
+    val measurementCount = 1
     val executionModes = Array("streaming")  // streaming, bulk
-    val microBatchSizes = Array(100) // 1, 2, 4, 8, 16, 32, 100, 1000)
+    val microBatchSizes = Array(4000) // 1, 2, 4, 8, 16, 32, 100, 1000)
     val matrixTypes = Array("dense")  // dense, sparse, auto
     val useSingleDatasetModes = Array(true)
 
@@ -359,7 +359,7 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
         .setMicroBatchSize(microBatchSize)
 
       val _ = measuredModel.fit(train)
-      measurements(i) = measuredModel.getPerformanceMeasures().get
+      measurements(i) = measuredModel.getPerformanceMeasures.get
       println(s"Total time, ${measurements(i).totalTime}")
       println(s"Column statistics, ${measurements(i).columnStatisticsTime}")
       println(s"Row statistics time, ${measurements(i).rowStatisticsTime}")

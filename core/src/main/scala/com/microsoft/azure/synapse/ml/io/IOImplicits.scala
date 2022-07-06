@@ -108,14 +108,14 @@ case class DataFrameExtensions(df: DataFrame) {
     a match {
       case s: Seq[_] => s.forall(fullJsonParsingSuccess)
       case a: Row => a.toSeq.forall(fullJsonParsingSuccess)
-      case null => false //scalastyle:ignore null
+      case null => false  //scalastyle:ignore null
       case _ => true
     }
   }
 
   private def partialJsonParsingSuccess(a: Any): Boolean = {
     a match {
-      case null => false //scalastyle:ignore null
+      case null => false  //scalastyle:ignore null
       case _ => true
     }
   }

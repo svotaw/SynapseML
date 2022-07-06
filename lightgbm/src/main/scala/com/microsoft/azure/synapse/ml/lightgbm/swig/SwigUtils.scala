@@ -3,7 +3,7 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm.swig
 
-import com.microsoft.ml.lightgbm.{SWIGTYPE_p_double, SWIGTYPE_p_float, SWIGTYPE_p_int, SWIGTYPE_p_long, SWIGTYPE_p_p_double, SWIGTYPE_p_p_int, SWIGTYPE_p_p_void, SWIGTYPE_p_unsigned_char, SWIGTYPE_p_void, doubleChunkedArray, floatChunkedArray, int32ChunkedArray, lightgbmlib}
+import com.microsoft.ml.lightgbm._
 
 object SwigUtils extends Serializable {
   /** Converts a native double array to a Java array using SWIG.
@@ -23,7 +23,7 @@ object SwigUtils extends Serializable {
   def floatArrayToNative(array: Array[Float]): SWIGTYPE_p_float = {
     val colArray = lightgbmlib.new_floatArray(array.length)
     array.zipWithIndex.foreach(ri =>
-      lightgbmlib.floatArray_setitem(colArray, ri._2.toLong, ri._1.toFloat))
+      lightgbmlib.floatArray_setitem(colArray, ri._2.toLong, ri._1))
     colArray
   }
 
@@ -167,8 +167,6 @@ class DoubleSwigArray(val array: SWIGTYPE_p_double) extends BaseSwigArray[Double
 
   def setItem(index: Long, item: Double): Unit = lightgbmlib.doubleArray_setitem(array, index, item)
 
-  def getItem(index: Long): Double = lightgbmlib.doubleArray_getitem(array, index)
-
   def delete(): Unit = lightgbmlib.delete_doubleArray(array)
 }
 
@@ -180,14 +178,14 @@ class IntSwigArray(val array: SWIGTYPE_p_int) extends BaseSwigArray[Int] {
 
   def setItem(index: Long, item: Int): Unit = lightgbmlib.intArray_setitem(array, index, item)
 
-  def getItem(index: Long): Int = lightgbmlib.intArray_getitem(array, index)
-
   def delete(): Unit = lightgbmlib.delete_intArray(array)
 }
 
 // Wraps void**
 class VoidPointerSwigArray(val array: SWIGTYPE_p_p_void, val size: Int) extends BaseSwigArray[SWIGTYPE_p_void] {
   def this(size: Int) = this(lightgbmlib.new_voidPtrArray(size), size)
+
+  def getItem(index: Long): SWIGTYPE_p_void = lightgbmlib.voidPtrArray_getitem(array, index)
 
   def setItem(index: Long, item: SWIGTYPE_p_void): Unit = {
     lightgbmlib.voidPtrArray_setitem(array, index, item) // set native pointer value
@@ -204,14 +202,16 @@ class DoublePointerSwigArray(val array: SWIGTYPE_p_p_double, val size: Int) exte
 
   def this(size: Int) = this(lightgbmlib.new_doublePtrArray(size), size)
 
+  def getItem(index: Long): DoubleSwigArray = columnVectors.apply(index.toInt).get
+
   def setItem(index: Long, item: DoubleSwigArray): Unit = {
-    columnVectors(index.toInt).map(array => array.delete()) // free existing vector if exists
+    columnVectors(index.toInt).foreach(array => array.delete()) // free existing vector if exists
     columnVectors(index.toInt) = Option(item) // store vector wrapper locally
     lightgbmlib.doublePtrArray_setitem(array, index, item.array) // set native pointer value
   }
 
   def pushElement(col: Int, row: Int, value: Double): Unit = {
-    columnVectors(col).map(v => v.setItem(row, value))
+    columnVectors(col).foreach(v => v.setItem(row, value))
   }
 
   def delete(): Unit =  {
@@ -227,10 +227,16 @@ class IntPointerSwigArray(val array: SWIGTYPE_p_p_int, val size: Int) extends Ba
 
   def this(size: Int) = this(lightgbmlib.new_intPtrArray(size), size)
 
+  def getItem(index: Long): IntSwigArray = columnVectors.apply(index.toInt).get
+
   def setItem(index: Long, item: IntSwigArray): Unit = {
-    columnVectors(index.toInt).map(array => array.delete()) // free existing vector if exists
+    columnVectors(index.toInt).foreach(array => array.delete()) // free existing vector if exists
     columnVectors(index.toInt) = Option(item) // store vector wrapper locally
     lightgbmlib.intPtrArray_setitem(array, index, item.array) // set native pointer value
+  }
+
+  def pushElement(col: Int, row: Int, value: Int): Unit = {
+    columnVectors(col).foreach(v => v.setItem(row, value))
   }
 
   def delete(): Unit =  {

@@ -5,10 +5,8 @@ package com.microsoft.azure.synapse.ml.lightgbm.dataset
 
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.sql.Row
-import com.microsoft.azure.synapse.ml.lightgbm.LightGBMUtils
 import com.microsoft.azure.synapse.ml.lightgbm.swig._
 import com.microsoft.ml.lightgbm._
-
 
 /** SampledData: Encapsulates the sampled data need to initialize a LightGBM dataset.
   * .
@@ -29,64 +27,70 @@ class SampledData(val numRows: Int, val numCols: Int) {
 
   // Allocate full arrays for each feature column, but we will push only non-zero values and
   // keep track of actual counts in rowCounts array
-  private val sampleData = new DoublePointerSwigArray(numCols)
-  private val sampleIndexes = new IntPointerSwigArray(numCols)
-  private val rowCounts = new IntSwigArray(numCols)
+  val sampleData = new DoublePointerSwigArray(numCols)
+  val sampleIndexes = new IntPointerSwigArray(numCols)
+  val rowCounts = new IntSwigArray(numCols)
 
   // Initialize column vectors (might move some of this to inside XPointerSwigArray)
-  (0 to numCols-1).foreach(col => {
+  (0 until numCols).foreach(col => {
     rowCounts.setItem(col, 0) // Initialize as 0-rowCount columns
 
     sampleData.setItem(col, new DoubleSwigArray(numRows))
-
-    val columnIndexes = new IntSwigArray(numRows);
-    sampleIndexes.setItem(col, columnIndexes)
+    sampleIndexes.setItem(col, new IntSwigArray(numRows))
   })
 
-  // Store non-zero elements in arrays given a dense feature value row
-  def pushRow(rowData: Row, featureColName: String): Unit = {
+  // Store non-zero elements in arrays given a feature value row
+  def pushRow(rowData: Row, index: Int, featureColName: String): Unit = {
     val data = rowData.getAs[Any](featureColName)
     data match {
-      case sparse: SparseVector => pushRow(sparse)
-      case dense: DenseVector => pushRow(dense)
+      case sparse: SparseVector => pushRow(sparse, index)
+      case dense: DenseVector => pushRow(dense, index)
       case _ => throw new IllegalArgumentException("Unknown row data type to push")
     }
   }
 
   // Store non-zero elements in arrays given a dense feature value row
-  def pushRow(rowData: DenseVector): Unit = pushRow(rowData.values)
+  def pushRow(rowData: DenseVector, index: Int): Unit = pushRow(rowData.values, index)
 
   // Store non-zero elements in arrays given a dense feature value array
-  def pushRow(rowData: Array[Double]): Unit = {
-    require(rowData.size <= numCols, s"Row is too large for sample data.  size should be $numCols" +
-                                     s", but is ${rowData.size}")
-    (0 until numCols).foreach(col => pushRowElementIfNotZero(col, rowData(col)))
+  def pushRow(rowData: Array[Double], index: Int): Unit = {
+    require(rowData.length <= numCols, s"Row is too large for sample data.  size should be $numCols" +
+                                     s", but is ${rowData.length}")
+    (0 until numCols).foreach(col => pushRowElementIfNotZero(col, rowData(col), index))
   }
 
   // Store non-zero elements in arrays given a sparse feature value row
-  def pushRow(rowData: SparseVector): Unit = {
+  def pushRow(rowData: SparseVector, index: Int): Unit = {
     require(rowData.size <= numCols, s"Row is too large for sample data.  size should be $numCols" +
                                      s", but is ${rowData.size}")
-    (0 until rowData.numActives).foreach(i => pushRowElementIfNotZero(rowData.indices(i), rowData.values(i)))
+    (0 until rowData.numActives).foreach(i =>
+      pushRowElementIfNotZero(rowData.indices(i), rowData.values(i), index))
   }
 
-  def pushRowElementIfNotZero(col: Int, value: Double): Unit = {
+  def pushRowElementIfNotZero(col: Int, value: Double, index: Int): Unit = {
     if (value != 0.0) {
       val nextIndex = rowCounts.getItem(col)
       sampleData.pushElement(col, nextIndex, value)
+      sampleIndexes.pushElement(col, nextIndex, index)
       rowCounts.setItem(col, nextIndex + 1) // increment row count
     }
   }
 
-  def getSampleData(): SWIGTYPE_p_p_double = {
+  def getSampleData: SWIGTYPE_p_p_double = {
     sampleData.array
   }
 
-  def getSampleIndices(): SWIGTYPE_p_p_int = {
+  def getSampleIndices: SWIGTYPE_p_p_int = {
     sampleIndexes.array
   }
 
-  def getRowCounts(): SWIGTYPE_p_int = {
+  def getRowCounts: SWIGTYPE_p_int = {
     rowCounts.array
+  }
+
+  def delete(): Unit = {
+    sampleData.delete()
+    sampleIndexes.delete()
+    rowCounts.delete()
   }
 }

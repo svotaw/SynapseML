@@ -3,15 +3,14 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm
 
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils._
 import com.microsoft.azure.synapse.ml.lightgbm.dataset._
 import com.microsoft.azure.synapse.ml.lightgbm.params.BaseTrainParams
 import com.microsoft.ml.lightgbm.lightgbmlib
-import org.apache.spark.sql.Row
 import org.apache.spark.sql.types.StructType
 import org.slf4j.Logger
 
 import java.util.concurrent.CountDownLatch
+import scala.collection.concurrent.TrieMap
 
 class SharedDatasetState(columnParams: ColumnParams,
                          schema: StructType,
@@ -22,53 +21,16 @@ class SharedDatasetState(columnParams: ColumnParams,
   val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
   val matrixType: String = trainParams.executionParams.matrixType
 
+  val streamingRowCounts = new TrieMap[Long, Long]()
+  val streamingRowOffsets = new TrieMap[Long, Long]()
+
+  @volatile var streamingDataset: Option[LightGBMDataset] = None
+
   private lazy val streamingPartitionDatasets = scala.collection.mutable.Map[Int, List[LightGBMDataset]]()
 
   lazy val denseAggregatedColumns: BaseDenseAggregatedColumns = new DenseSyncAggregatedColumns(chunkSize)
 
   lazy val sparseAggregatedColumns: BaseSparseAggregatedColumns = new SparseSyncAggregatedColumns(chunkSize)
-
-  def prepBulk(iter: Iterator[Row]): BaseChunkedColumns = {
-    val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) =
-      getArrayType(iter, matrixType, columnParams.featuresColumn)
-    val peekableIter = new PeekingIterator(concatRowsIter)
-    // Note: the first worker gets to officially set "is sparse", other workers read it
-    sharedState.linkIsSparse(isSparseHere)
-
-    if (!sharedState.isSparse.get) {
-      new DenseChunkedColumns(peekableIter, columnParams, schema, chunkSize)
-    } else {
-      new SparseChunkedColumns(peekableIter, columnParams, schema, chunkSize, useSingleDataset)
-    }
-  }
-
-  def mergeBulk(ts: BaseChunkedColumns): BaseAggregatedColumns = {
-    val isSparseVal = sharedState.isSparse.get
-    val aggregatedColumns = if (!isSparseVal) {
-      if (useSingleDataset) denseAggregatedColumns
-      else new DenseAggregatedColumns(chunkSize)
-    } else {
-      if (useSingleDataset) sparseAggregatedColumns
-      else new SparseAggregatedColumns(chunkSize)
-    }
-    // For the validation Dataset in useSingleDataset mode, we only want 1 copy of the data (otherwise
-    // every partition appends the same broadcast-ed data). That one copy will be made by the main execution worker.
-    val mergeRowsIntoDataset: Boolean =
-      if (!isForValidation) true
-      else !useSingleDataset || sharedState.mainExecutorWorker.get == LightGBMUtils.getTaskId
-    if (mergeRowsIntoDataset) {
-      aggregatedColumns.incrementCount(ts)
-    }
-    if (useSingleDataset) {
-      arrayProcessedSignal.countDown()
-      arrayProcessedSignal.await()
-    }
-    if (mergeRowsIntoDataset) {
-      aggregatedColumns.addRows(ts)
-    }
-    ts.release()
-    aggregatedColumns
-  }
 
   @volatile var arrayProcessedSignal: CountDownLatch = new CountDownLatch(0)
 
@@ -120,10 +82,6 @@ class SharedDatasetState(columnParams: ColumnParams,
 class SharedState(columnParams: ColumnParams,
                   schema: StructType,
                   trainParams: BaseTrainParams) {
-  //val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
-  //val chunkSize: Int = trainParams.executionParams.chunkSize
-  //val matrixType: String = trainParams.executionParams.matrixType
-
   val datasetState: SharedDatasetState = new SharedDatasetState(
     columnParams,
     schema,
@@ -140,6 +98,11 @@ class SharedState(columnParams: ColumnParams,
   @volatile var isSparse: Option[Boolean] = None
   @volatile var mainExecutorWorker: Option[Long] = None
   @volatile var validationDatasetWorker: Option[Long] = None
+
+  def getSharedTrainingDataset(): LightGBMDataset = {
+    // There should only be 1 Dataset in the array
+    datasetState.getSharedStreamingDatasets().head
+  }
 
   def getSharedValidationDataset(): LightGBMDataset = {
     // There should only be 1 Dataset in the array
@@ -182,21 +145,12 @@ class SharedState(columnParams: ColumnParams,
   }
 
   @volatile var dataPreparationDoneSignal: CountDownLatch = new CountDownLatch(0)
-  @volatile var trainingDoneSignal: CountDownLatch = new CountDownLatch(0)
 
   def incrementDataPrepDoneSignal(log: Logger): Unit = {
     this.synchronized {
       val count = dataPreparationDoneSignal.getCount.toInt + 1
       dataPreparationDoneSignal = new CountDownLatch(count)
       log.info(s"Task incrementing DataPrepDoneSignal to $count")
-    }
-  }
-
-  def incrementTrainingDoneSignal(log: Logger): Unit = {
-    this.synchronized {
-      val count = trainingDoneSignal.getCount.toInt + 1
-      trainingDoneSignal = new CountDownLatch(count)
-      log.info(s"Task incrementing TrainingDoneSignal to $count")
     }
   }
 

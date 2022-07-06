@@ -11,7 +11,7 @@ import org.apache.spark.sql.types.StructType
 import org.slf4j.Logger
 
 case class NetworkParams(defaultListenPort: Int,
-                         addr: String,
+                         ipAddress: String,
                          port: Int,
                          barrierExecutionMode: Boolean)
 case class ColumnParams(labelColumn: String,
@@ -35,22 +35,23 @@ case class TrainingContext(batchIndex: Int,
                            featureNames: Option[Array[String]],
                            numTasksPerExecutor: Int,
                            validationData: Option[Broadcast[Array[Row]]],
-                           serializedReferenceDataset: Option[Broadcast[Array[Byte]]],
+                           broadcastedSampleData: Option[Broadcast[Array[Row]]],
                            partitionCounts: Option[Array[Long]]) extends Serializable {
-  @transient var log: Logger = null
+  @transient var log: Logger = null //scalastyle:ignore null
 
   val isProvideTrainingMetric: Boolean = { trainingParams.isProvideTrainingMetric.getOrElse(false) }
   val improvementTolerance: Double = { trainingParams.generalParams.improvementTolerance }
   val earlyStoppingRound: Int = { trainingParams.generalParams.earlyStoppingRound }
   val microBatchSize: Int = { trainingParams.executionParams.microBatchSize }
 
-  val useSingleDatasetMode = trainingParams.executionParams.useSingleDatasetMode
+  val isStreaming: Boolean = trainingParams.executionParams.executionMode == LightGBMConstants.StreamingExecutionMode
+
+  val useSingleDatasetMode: Boolean = trainingParams.executionParams.useSingleDatasetMode || isStreaming
 
   val isClassification: Boolean = { trainingParams.isInstanceOf[ClassifierTrainParams] }
 
-  val hasValid = validationData.isDefined
+  val hasValidationData: Boolean = validationData.isDefined
 
-  val isStreaming: Boolean = trainingParams.executionParams.executionMode == LightGBMConstants.StreamingExecutionMode
 
   val hasWeights: Boolean = { columnParams.weightColumn.isDefined && columnParams.weightColumn.get.nonEmpty }
   val hasInitialScores: Boolean = { columnParams.initScoreColumn.isDefined &&
@@ -59,9 +60,8 @@ case class TrainingContext(batchIndex: Int,
 
   def sharedState(): SharedState = { sharedStateSingleton.get }
 
-  def incrementArrayProcessedSignal(): Int = { sharedState.incrementArrayProcessedSignal(log) }
-  def incrementDataPrepDoneSignal(): Unit = { sharedState.incrementDataPrepDoneSignal(log) }
-  def incrementTrainingDoneSignal(): Unit = { sharedState.incrementTrainingDoneSignal(log) }
+  def incrementArrayProcessedSignal(): Int = { sharedState().incrementArrayProcessedSignal(log) }
+  def incrementDataPrepDoneSignal(): Unit = { sharedState().incrementDataPrepDoneSignal(log) }
 
   /** Determines if the current task should calculate the validation Dataset.
     * Only 1 task per executor needs to do it, and first one to call this gets the assignment.
@@ -69,13 +69,13 @@ case class TrainingContext(batchIndex: Int,
     * @return True if the current task should create, false otherwise.
     */
   def shouldCreateValidationDataset(): Boolean = {
-    if (hasValid) {
+    if (hasValidationData) {
       sharedState().linkValidationDatasetWorker()
       sharedState().validationDatasetWorker.get == LightGBMUtils.getTaskId
     } else false
   }
 
   def setLogger(logger: Logger): Unit = {
-    log = logger;
+    log = logger
   }
 }

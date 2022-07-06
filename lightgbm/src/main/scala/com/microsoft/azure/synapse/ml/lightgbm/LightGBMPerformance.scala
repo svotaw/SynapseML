@@ -11,6 +11,8 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
   private var libraryInitializationStop: Long = 0
   private var networkInitializationStart: Long = 0
   private var networkInitializationStop: Long = 0
+  private var samplingStart: Long = 0
+  private var samplingStop: Long = 0
   private var dataPreparationStart: Long = 0
   private var dataPreparationStop: Long = 0
   private var waitStart: Long = 0
@@ -33,6 +35,8 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
   def markLibraryInitializationStop(): Unit = { libraryInitializationStop = System.currentTimeMillis() }
   def markNetworkInitializationStart(): Unit = { networkInitializationStart = System.currentTimeMillis() }
   def markNetworkInitializationStop(): Unit = { networkInitializationStop = System.currentTimeMillis() }
+  def markSamplingStart(): Unit = { samplingStart = System.currentTimeMillis() }
+  def markSamplingStop(): Unit = { samplingStop = System.currentTimeMillis() }
   def markDataPreparationStart(): Unit = { dataPreparationStart = System.currentTimeMillis() }
   def markDataPreparationStop(): Unit = { dataPreparationStop = System.currentTimeMillis() }
   def markWaitStart(): Unit = { waitStart = System.currentTimeMillis() }
@@ -69,8 +73,6 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
   def overheadTime: Long = {
     (totalTime
       - initializationTime
-      - networkInitializationTime
-      - libraryInitializationTime
       - dataPreparationTime
       - waitTime
       - datasetCreationTime
@@ -99,8 +101,8 @@ class ExecutionMeasures() extends Serializable {
 
   def setTaskMeasures(taskStats: Seq[TaskExecutionMeasures]): Unit = { taskMeasures = Option(taskStats) }
 
-  def markValidationDataCollectionStart(): Unit = { validationDataCollectionStart = System.currentTimeMillis() }
-  def markValidationDataCollectionStop(): Unit = { validationDataCollectionStop = System.currentTimeMillis() }
+  def markValidDataCollectionStart(): Unit = { validationDataCollectionStart = System.currentTimeMillis() }
+  def markValidDataCollectionStop(): Unit = { validationDataCollectionStop = System.currentTimeMillis() }
   def markColumnStatisticsStart(): Unit = { columnStatisticsStart = System.currentTimeMillis() }
   def markColumnStatisticsStop(): Unit = { columnStatisticsStop = System.currentTimeMillis() }
   def markRowStatisticsStart(): Unit = { rowStatisticsStart = System.currentTimeMillis() }
@@ -113,7 +115,7 @@ class ExecutionMeasures() extends Serializable {
   def markTrainingStop(): Unit = { trainingStop = System.currentTimeMillis() }
   def markExecutionEnd(): Unit = { endTime = System.currentTimeMillis() }
 
-  def getTaskMeasures(): Seq[TaskExecutionMeasures] = { taskMeasures.get }
+  def getTaskMeasures: Seq[TaskExecutionMeasures] = { taskMeasures.get }
 
   def validationDataCollectionTime(): Long = {
     if (validationDataCollectionStop == 0) 0
@@ -166,7 +168,7 @@ class ExecutionMeasures() extends Serializable {
     if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.datasetCreationTime) else Seq()
   }
 
-  def taskValidationDatasetCreationTimes(): Seq[Long] = {
+  def taskValidDatasetCreationTimes(): Seq[Long] = {
     if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.validationDatasetCreationTime) else Seq()
   }
 
@@ -183,7 +185,6 @@ class ExecutionMeasures() extends Serializable {
   }
 
   def taskOverheadTimes(): Seq[Long] = {
-    val debug = taskMeasures.get(0).overheadTime
     if (taskMeasures.isDefined) taskMeasures.get.map(measures => measures.overheadTime) else Seq()
   }
 }
@@ -205,14 +206,14 @@ trait LightGBMPerformance extends Serializable {
     this
   }
 
-  def getAllPerformanceMeasures(): Option[Array[ExecutionMeasures]] = {
-    performanceMeasures.map(array => array.flatMap(element => element))
+  def getAllPerformanceMeasures: Option[Array[ExecutionMeasures]] = {
+    performanceMeasures.map(array => array.flatten)
   }
 
   /** In the common case of 1 batch, there is only 1 measure, so this is a convenience method.
     *
     */
-  def getPerformanceMeasures(): Option[ExecutionMeasures] = {
+  def getPerformanceMeasures: Option[ExecutionMeasures] = {
     performanceMeasures.flatMap(array => array(0))
   }
 }

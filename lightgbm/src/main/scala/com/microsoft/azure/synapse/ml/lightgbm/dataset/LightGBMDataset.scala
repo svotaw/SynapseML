@@ -60,13 +60,13 @@ class LightGBMDataset(val datasetPtr: SWIGTYPE_p_void) extends AutoCloseable {
   /** Get the number of pushed rows in the Dataset.
     * @return The number of rows.
     */
-  def numPushedData(): Int = {
+  /* TODO decide fate   def numPushedData(): Int = {
     val numDataPtr = lightgbmlib.new_intp()
     LightGBMUtils.validate(lightgbmlib.LGBM_DatasetGetNumPushedData(datasetPtr, numDataPtr), "DatasetGetNumData")
     val numData = lightgbmlib.intp_value(numDataPtr)
     lightgbmlib.delete_intp(numDataPtr)
     numData
-  }
+  } */
 
   /** Get the number of features in the Dataset.
     * @return The number of features.
@@ -198,6 +198,6 @@ class LightGBMDataset(val datasetPtr: SWIGTYPE_p_void) extends AutoCloseable {
 
   override def close(): Unit = {
     // Free dataset
-    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr), "Finalize Dataset")
+    // TODO put back  LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr), "Finalize Dataset")
   }
 }

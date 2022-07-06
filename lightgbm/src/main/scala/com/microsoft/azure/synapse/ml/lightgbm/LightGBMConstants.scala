@@ -62,10 +62,3 @@ object LightGBMConstants {
   val InitialDelay: Long = 1000L
 }
 
-/**
-  * Connection state of a worker
-  */
-object ConnectionState extends Enumeration {
-  type ConnectionState = Value
-  val Finished, EmptyTask, Connected = Value
-}
