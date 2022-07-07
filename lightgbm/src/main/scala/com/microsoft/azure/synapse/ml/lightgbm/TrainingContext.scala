@@ -21,7 +21,9 @@ case class ColumnParams(labelColumn: String,
                         groupColumn: Option[String])
 
 /**
-  * Object to encapsulate all information about a training that does not change during execution
+  * Object to encapsulate all information about a training session that does not change during execution
+  * and can be created on the driver.
+  * There is also a reference to the shared state in an executor, which can change over time.
   */
 case class TrainingContext(batchIndex: Int,
                            sharedStateSingleton: SharedSingleton[SharedState],
@@ -37,8 +39,6 @@ case class TrainingContext(batchIndex: Int,
                            validationData: Option[Broadcast[Array[Row]]],
                            broadcastedSampleData: Option[Broadcast[Array[Row]]],
                            partitionCounts: Option[Array[Long]]) extends Serializable {
-  @transient var log: Logger = null //scalastyle:ignore null
-
   val isProvideTrainingMetric: Boolean = { trainingParams.isProvideTrainingMetric.getOrElse(false) }
   val improvementTolerance: Double = { trainingParams.generalParams.improvementTolerance }
   val earlyStoppingRound: Int = { trainingParams.generalParams.earlyStoppingRound }
@@ -60,8 +60,8 @@ case class TrainingContext(batchIndex: Int,
 
   def sharedState(): SharedState = { sharedStateSingleton.get }
 
-  def incrementArrayProcessedSignal(): Int = { sharedState().incrementArrayProcessedSignal(log) }
-  def incrementDataPrepDoneSignal(): Unit = { sharedState().incrementDataPrepDoneSignal(log) }
+  def incrementArrayProcessedSignal(log: Logger): Int = { sharedState().incrementArrayProcessedSignal(log) }
+  def incrementDataPrepDoneSignal(log: Logger): Unit = { sharedState().incrementDataPrepDoneSignal(log) }
 
   /** Determines if the current task should calculate the validation Dataset.
     * Only 1 task per executor needs to do it, and first one to call this gets the assignment.
@@ -73,9 +73,5 @@ case class TrainingContext(batchIndex: Int,
       sharedState().linkValidationDatasetWorker()
       sharedState().validationDatasetWorker.get == LightGBMUtils.getTaskId
     } else false
-  }
-
-  def setLogger(logger: Logger): Unit = {
-    log = logger
   }
 }

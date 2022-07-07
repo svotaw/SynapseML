@@ -390,7 +390,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * @return The LightGBM Model from the trained LightGBM Booster.
     */
   protected def trainOneDataBatch(dataset: Dataset[_], batchIndex: Int): TrainedModel = {
-    val measures = new ExecutionMeasures()
+    val measures = new InstrumentationMeasures()
     setBatchPerformanceMeasure(batchIndex, measures)
     val numTasksPerExecutor = ClusterUtil.getNumTasksPerExecutor(dataset.sparkSession, log)
     // By default, we try to intelligently calculate the number of executors, but user can override this with numTasks
@@ -448,7 +448,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * @param df The dataset to train on.
     * @return The number of feature columns and initial score classes
     */
-  private def collectValidationData(df: DataFrame, measures: ExecutionMeasures): Array[Row] = {
+  private def collectValidationData(df: DataFrame, measures: InstrumentationMeasures): Array[Row] = {
     measures.markValidDataCollectionStart()
     val data = preprocessData(df.filter(x =>
       x.getBoolean(x.fieldIndex(getValidationIndicatorCol)))).collect()
@@ -462,7 +462,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * @param dataframe The dataset to train on.
     * @return The number of feature columns and initial score classes
     */
-  protected def calculateColumnStatistics(dataframe: DataFrame, measures: ExecutionMeasures): (Int, Int) = {
+  protected def calculateColumnStatistics(dataframe: DataFrame, measures: InstrumentationMeasures): (Int, Int) = {
     measures.markColumnStatisticsStart()
     // Use the first row to get the column count
     val firstRow: Row = dataframe.first()
@@ -496,7 +496,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
   protected def calculateRowStatistics(dataframe: DataFrame,
                                        trainingParams: BaseTrainParams,
                                        numCols: Int,
-                                       measures: ExecutionMeasures): (Array[Row], Array[Long]) = {
+                                       measures: InstrumentationMeasures): (Array[Row], Array[Long]) = {
     measures.markRowStatisticsStart()
 
     // Get the row counts per partition
@@ -564,13 +564,12 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
                                    batchIndex: Int,
                                    numTasks: Int,
                                    numTasksPerExecutor: Int,
-                                   measures: ExecutionMeasures): TrainedModel = {
+                                   measures: InstrumentationMeasures): TrainedModel = {
     val networkManager = NetworkManager.create(numTasks,
-                                                 dataframe.sparkSession,
-                                                 getDriverListenPort,
-                                                 getTimeout,
-                                                 getUseBarrierExecutionMode,
-                                                 log)
+                                               dataframe.sparkSession,
+                                               getDriverListenPort,
+                                               getTimeout,
+                                               getUseBarrierExecutionMode)
     val ctx = getTrainingContext(dataframe,
                                  validationData,
                                  broadcastedSampleData,
@@ -595,11 +594,11 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
 
   protected def executeTrainingFromDriver(ctx: TrainingContext,
                                          dataframe: DataFrame,
-                                         measures: ExecutionMeasures): LightGBMBooster = {
+                                         measures: InstrumentationMeasures): LightGBMBooster = {
     // Create the object that will manage the mapPartitions function
     val workerTaskHandler: BasePartitionTask = if (ctx.isStreaming) new StreamingPartitionTask()
     else new BulkPartitionTask()
-    val mapPartitionsFunc = mapPartitions(ctx, workerTaskHandler)(_)
+    val mapPartitionsFunc = workerTaskHandler.mapPartitionTask(ctx)(_)
 
     val encoder = Encoders.kryo[PartitionResult]
     measures.markTrainingStart()
@@ -636,40 +635,25 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       networkManager.host,
       networkManager.port,
       networkManager.useBarrierExecutionMode)
-    val columnParams = getColumnParams
-    val schema = dataframe.schema
-    val sharedState = SharedSingleton(new SharedState(columnParams, schema, trainParams))
+    val sharedState = SharedSingleton(new SharedState(trainParams))
     val datasetParams = getDatasetCreationParams(
       trainParams.generalParams.categoricalFeatures,
       trainParams.executionParams.numThreads)
 
     TrainingContext(batchIndex, // TODO log this context?
       sharedState,
-      schema,
+      dataframe.schema,
       numCols,
       numInitValueClasses,
       trainParams,
       networkParams,
-      columnParams,
+      getColumnParams,
       datasetParams,
       getSlotNamesWithMetadata(dataframe.schema(getFeaturesCol)),
       numTasksPerExecutor,
       validationData,
       broadcastedSampleData,
       partitionCounts)
-  }
-
-  /** Method that is executed per worker as part of Spark mapPartitions call. Just sets the
-    * Logger (since it's not serializable) and calls the dedicated worker task class.
-    *
-    * @return Iterator[T], as per Spark API
-    */
-  private def mapPartitions(ctx: TrainingContext,
-                            task: BasePartitionTask)
-                           (inputRows: Iterator[Row]): Iterator[PartitionResult] = {
-    // TODO set Logger on BasePartitionTask directly?
-    ctx.setLogger(log) // Logger is not serializable, so set it in the context of the worker
-    task.mapPartitionTask(ctx)(inputRows)
   }
 
   /** Optional group column for Ranking, set to None by default.

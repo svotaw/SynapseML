@@ -5,9 +5,9 @@ package com.microsoft.azure.synapse.ml.lightgbm.split1
 
 import com.microsoft.azure.synapse.ml.core.test.base.TestBase
 import com.microsoft.azure.synapse.ml.lightgbm._
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{ChunkedArrayUtils, LightGBMDataset, SampledData}
-import com.microsoft.azure.synapse.ml.lightgbm.swig.{DoubleChunkedArray, DoublePointerSwigArray, DoubleSwigArray, IntPointerSwigArray, IntSwigArray, SwigUtils}
-import com.microsoft.ml.lightgbm.{SWIGTYPE_p_int, SWIGTYPE_p_p_void, SWIGTYPE_p_void, lightgbmlib}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{ChunkedArrayUtils, SampledData}
+import com.microsoft.azure.synapse.ml.lightgbm.swig.{DoubleChunkedArray, DoubleSwigArray, IntSwigArray, SwigUtils}
+import com.microsoft.ml.lightgbm.{SWIGTYPE_p_p_void, SWIGTYPE_p_void, lightgbmlib}
 import org.apache.spark.ml.linalg.{DenseVector, SparseVector}
 import org.apache.spark.sql.DataFrame
 
@@ -105,24 +105,6 @@ class VerifyLightGBMCommon extends TestBase with LightGBMTestUtils  {
       val indexes = sampledData.sampleIndexes.getItem(col)
       (0 until rowCount).foreach(i => println(s"  Index: ${indexes.getItem(i)}, val: ${values.getItem(i)}"))
     })
-    /*val sampleData = new DoublePointerSwigArray(numCols)
-    val sampleIndexes = new IntPointerSwigArray(numCols)
-    val rowCounts = new IntSwigArray(numCols)
-
-    val count = 10
-    // Initialize column vectors (might move some of this to inside XPointerSwigArray)
-    (0 until numCols).foreach(col => {
-      rowCounts.setItem(col, count) // Initialize as 0-rowCount columns
-
-      val valArray = new DoubleSwigArray(count)
-      val indArray = new IntSwigArray(count)
-      (0 until count).foreach(i => {
-        valArray.setItem(i, 10.0)
-        indArray.setItem(i, i)
-      })
-      sampleData.setItem(col, valArray)
-      sampleIndexes.setItem(col, indArray)
-    })*/
 
     var datasetVoidPtr:SWIGTYPE_p_p_void = null
     try {
@@ -138,30 +120,11 @@ class VerifyLightGBMCommon extends TestBase with LightGBMTestUtils  {
         s"max_bin=255 bin_construct_sample_cnt=$numRows min_data_in_leaf=1 num_threads=3",
         datasetVoidPtr)
       println(s"Result code for LGBM_DatasetCreateFromSampledColumn: $resultCode")
-
-
-      val intPtr = lightgbmlib.new_intp()
-      val resultCode2 =
-        lightgbmlib.LGBM_DatasetGetNumData(lightgbmlib.voidpp_value(datasetVoidPtr), intPtr)
-      println(s"Result code for LGBM_DatasetGetNumData: $resultCode2")
-      val datasetCount = lightgbmlib.intp_value(intPtr)
-      println(s"Count: $datasetCount")
-      lightgbmlib.delete_intp(intPtr)
     } finally {
-
-
-
-      println("Freeing arrays")
       sampledData.delete()
-      /*sampleData.delete()
-      sampleIndexes.delete()
-      rowCounts.delete()*/
 
-      println("Freeing Dataset")
       val datasetPtr: SWIGTYPE_p_void = lightgbmlib.voidpp_value(datasetVoidPtr)
-      LightGBMUtils.validate(
-        lightgbmlib.LGBM_DatasetFree(datasetPtr),
-        "Dataset LGBM_DatasetFree")
+      LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr), "Dataset LGBM_DatasetFree")
 
       lightgbmlib.delete_voidpp(datasetVoidPtr)
     }

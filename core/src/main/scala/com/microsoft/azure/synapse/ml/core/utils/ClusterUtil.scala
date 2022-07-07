@@ -14,7 +14,8 @@ object ClusterUtil {
   /** Get number of tasks from dummy dataset for 1 executor.
     * Note: all executors have same number of cores,
     * and this is more reliable than getting value from conf.
-    * @param dataset The dataset containing the current spark session.
+    * @param spark The current spark session.
+    * @param log The Logger.
     * @return The number of tasks per executor.
     */
   def getNumTasksPerExecutor(spark: SparkSession, log: Logger): Int = {

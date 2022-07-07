@@ -198,6 +198,6 @@ class LightGBMDataset(val datasetPtr: SWIGTYPE_p_void) extends AutoCloseable {
 
   override def close(): Unit = {
     // Free dataset
-    // TODO put back  LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr), "Finalize Dataset")
+    LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(datasetPtr), "Free Dataset")
   }
 }

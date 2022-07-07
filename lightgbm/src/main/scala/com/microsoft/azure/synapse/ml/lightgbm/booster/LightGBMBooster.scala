@@ -230,7 +230,6 @@ class LightGBMBooster(val trainDataset: Option[LightGBMDataset] = None,
 
   @transient
   lazy val boosterHandler: BoosterHandler = {
-    // DEBUG LightGBMUtils.initializeNativeLibrary()
     if (trainDataset.isEmpty && modelStr.isEmpty) {
       throw new IllegalArgumentException("One of training dataset or serialized model parameters must be specified")
     }

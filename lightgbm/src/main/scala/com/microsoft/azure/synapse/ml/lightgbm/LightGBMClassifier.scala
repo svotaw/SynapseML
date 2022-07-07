@@ -63,7 +63,7 @@ class LightGBMClassifier(override val uid: String)
 
   override protected def calculateCustomTrainParams(params: BaseTrainParams, dataset: Dataset[_]): Unit = {
     /* The native code for getting numClasses is always 1 unless it is multiclass-classification problem
-     * so we infer the actual numClasses from the dataset here.  Since this is a full pass over
+     * so we infer the actual numClasses from the dataset here.  Since this could be a full pass over
      * the data, explicitly call it out as a calculation and only do it if needed.
      */
     val classifierParams = params.asInstanceOf[ClassifierTrainParams]
@@ -177,11 +177,11 @@ class LightGBMClassificationModel(override val uid: String)
   override def numClasses: Int = getActualNumClasses
 
   override def predictRaw(features: Vector): Vector = {
-    Vectors.dense(getModel.score(features, true, true, getPredictDisableShapeCheck))
+    Vectors.dense(getModel.score(features, raw = true, classification = true, getPredictDisableShapeCheck))
   }
 
   override def predictProbability(features: Vector): Vector = {
-    Vectors.dense(getModel.score(features, false, true, getPredictDisableShapeCheck))
+    Vectors.dense(getModel.score(features, raw = false, classification = true, getPredictDisableShapeCheck))
   }
 
   override def copy(extra: ParamMap): LightGBMClassificationModel = defaultCopy(extra)

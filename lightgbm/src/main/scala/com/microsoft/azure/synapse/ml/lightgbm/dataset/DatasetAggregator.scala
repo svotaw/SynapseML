@@ -426,7 +426,6 @@ private[lightgbm] abstract class BaseDenseAggregatedColumns(chunkSize: Int) exte
     addMetadataToDataset(dataset)
     dataset
   }
-
 }
 
 

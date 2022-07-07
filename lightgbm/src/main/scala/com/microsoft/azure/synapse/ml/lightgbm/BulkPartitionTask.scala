@@ -16,26 +16,25 @@ class BulkPartitionTask extends BasePartitionTask {
   override protected def initializeInternal(ctx: PartitionTaskContext): PartitionTaskContext = {
     // For useSingleDataset mode, we need to add to bulk synchronization stops
     if (ctx.trainingCtx.useSingleDatasetMode) {
-      ctx.sharedState.incrementArrayProcessedSignal(ctx.log)
-      if (!ctx.isMainWorker) ctx.sharedState.incrementDataPrepDoneSignal(ctx.log)
+      ctx.sharedState.incrementArrayProcessedSignal(log)
+      if (!ctx.isMainWorker) ctx.sharedState.incrementDataPrepDoneSignal(log)
     }
 
     ctx
   }
 
-
   protected def preparePartitionDataInternal(ctx: PartitionTaskContext,
                                              inputRows: Iterator[Row]): PartitionDataState = {
     // In useSingleDataset mode, we need to synchronize start of data loading
     if (ctx.shouldExecuteTraining) {
-      // TODO why not always count down?
+      // If in useSingleDatasetMode, we need to set a signal that helpers can start
       if (ctx.trainingCtx.useSingleDatasetMode) ctx.sharedState.helperStartSignal.countDown()
     } else {
-      ctx.log.info(s"Waiting for helper start signal on partition ${ctx.partitionId}")
+      log.info(s"Waiting for helper start signal on partition ${ctx.partitionId}")
       ctx.sharedState.helperStartSignal.await()
     }
 
-    ctx.log.info(s"Waiting for helper start signal on partition ${ctx.partitionId}")
+    // Store the chunked partition data in local memory and then add it to the aggregated data
     val aggregatedColumns = {
       val prepAggregatedColumns: BaseChunkedColumns = getChunkedColumns(ctx, inputRows)
       mergeChunksIntoAggregatedArrays(ctx, prepAggregatedColumns, isForValidation = false)
@@ -51,7 +50,8 @@ class BulkPartitionTask extends BasePartitionTask {
                                              dataState: PartitionDataState,
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset = {
-    val ac = if (forValidation) dataState.aggregatedValidationData.get else dataState.aggregatedTrainingData.get
+    val ac = if (forValidation) dataState.aggregatedValidationData.get
+             else dataState.aggregatedTrainingData.get
     try {
       val datasetInner: LightGBMDataset = ac.generateDataset(referenceDataset, ctx.trainingCtx.datasetParams)
       ctx.trainingCtx.columnParams.groupColumn.foreach(_ => datasetInner.addGroupColumn(ac.getGroups))
@@ -79,17 +79,17 @@ class BulkPartitionTask extends BasePartitionTask {
   }
 
   private def mergeChunksIntoAggregatedArrays(ctx: PartitionTaskContext,
-                                      ts: BaseChunkedColumns,
-                                      isForValidation: Boolean): BaseAggregatedColumns = {
+                                              ts: BaseChunkedColumns,
+                                              isForValidation: Boolean): BaseAggregatedColumns = {
     val sharedState = ctx.sharedState
     val useSingleDataset = ctx.trainingCtx.useSingleDatasetMode
-    val isSparseVal = sharedState.isSparse.get
+    val isSparse = sharedState.isSparse.get
     val sharedDatasetState =
       if (isForValidation) sharedState.validationDatasetState
       else sharedState.datasetState
 
     // Determine if we are using shared single Dataset for executor, or one per partition
-    val aggregatedColumns = if (!isSparseVal) {
+    val aggregatedColumns = if (!isSparse) {
       if (useSingleDataset) sharedDatasetState.denseAggregatedColumns
       else new DenseAggregatedColumns(ctx.trainingParams.executionParams.chunkSize)
     } else {
@@ -107,6 +107,7 @@ class BulkPartitionTask extends BasePartitionTask {
     if (mergeRowsIntoDataset) {
       aggregatedColumns.incrementCount(ts, ctx.partitionId)
     }
+
     if (useSingleDataset) {
       sharedDatasetState.arrayProcessedSignal.countDown()
       sharedDatasetState.arrayProcessedSignal.await()
@@ -125,15 +126,17 @@ class BulkPartitionTask extends BasePartitionTask {
 
   private def determineMatrixType(ctx: PartitionTaskContext,
                                   inputRows: Iterator[Row]): PeekingIterator[Row] = {
-    // TODO only set this once
-    val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) =
-      getArrayType(
-        inputRows,
-        ctx.trainingCtx.trainingParams.executionParams.matrixType,
-        ctx.trainingCtx.columnParams.featuresColumn)
-    val peekingIter = new PeekingIterator(concatRowsIter)
-    // Note: the first worker gets to officially set "is sparse", other workers read it
-    ctx.sharedState.linkIsSparse(isSparseHere)
-    peekingIter
+    if (ctx.sharedState.isSparse.isDefined) new PeekingIterator(inputRows)
+    else {
+      val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) =
+        getArrayType(
+          inputRows,
+          ctx.trainingCtx.trainingParams.executionParams.matrixType,
+          ctx.trainingCtx.columnParams.featuresColumn)
+      val peekingIter = new PeekingIterator(concatRowsIter)
+      // Note: the first worker gets to officially set "is sparse", other workers read it
+      ctx.sharedState.linkIsSparse(isSparseHere)
+      peekingIter
+    }
   }
 }

@@ -6,7 +6,7 @@ package com.microsoft.azure.synapse.ml.lightgbm.split1
 import com.microsoft.azure.synapse.ml.core.test.benchmarks.{Benchmarks, DatasetUtils}
 import com.microsoft.azure.synapse.ml.core.test.fuzzing.{EstimatorFuzzing, TestObject}
 import com.microsoft.azure.synapse.ml.lightgbm._
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{ChunkedArrayUtils, LightGBMDataset}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.LightGBMDataset
 import com.microsoft.azure.synapse.ml.lightgbm.params.FObjTrait
 import com.microsoft.azure.synapse.ml.stages.MultiColumnAdapter
 import org.apache.commons.io.FileUtils
@@ -347,7 +347,7 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
                          matrixType: String,
                          useSingleDataset: Boolean): Unit = {
     val Array(train, _) = df.randomSplit(Array(0.8, 0.2), seed)
-    val measurements = Array.ofDim[ExecutionMeasures](measurementCount)
+    val measurements = Array.ofDim[InstrumentationMeasures](measurementCount)
 
     (0 until measurementCount).foreach(i => {
       println(s"** Start Measurement $i")

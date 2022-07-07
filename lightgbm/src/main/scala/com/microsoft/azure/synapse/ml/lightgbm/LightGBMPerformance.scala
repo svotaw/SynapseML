@@ -3,7 +3,11 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm
 
-class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
+/**
+  * Class for encapsulating performance instrumentation measures.
+  */
+
+class TaskInstrumentationMeasures(val partitionId: Int) extends Serializable {
   private val startTime = System.currentTimeMillis()
   private var initializationStart: Long = 0
   private var initializationStop: Long = 0
@@ -81,7 +85,7 @@ class TaskExecutionMeasures(val partitionId: Int) extends Serializable {
   }
 }
 
-class ExecutionMeasures() extends Serializable {
+class InstrumentationMeasures() extends Serializable {
   private val startTime = System.currentTimeMillis()
   private var validationDataCollectionStart: Long = 0
   private var validationDataCollectionStop: Long = 0
@@ -97,9 +101,9 @@ class ExecutionMeasures() extends Serializable {
   private var trainingStop: Long = 0
   private var endTime: Long = 0
 
-  private var taskMeasures: Option[Seq[TaskExecutionMeasures]] = None
+  private var taskMeasures: Option[Seq[TaskInstrumentationMeasures]] = None
 
-  def setTaskMeasures(taskStats: Seq[TaskExecutionMeasures]): Unit = { taskMeasures = Option(taskStats) }
+  def setTaskMeasures(taskStats: Seq[TaskInstrumentationMeasures]): Unit = { taskMeasures = Option(taskStats) }
 
   def markValidDataCollectionStart(): Unit = { validationDataCollectionStart = System.currentTimeMillis() }
   def markValidDataCollectionStop(): Unit = { validationDataCollectionStop = System.currentTimeMillis() }
@@ -115,7 +119,7 @@ class ExecutionMeasures() extends Serializable {
   def markTrainingStop(): Unit = { trainingStop = System.currentTimeMillis() }
   def markExecutionEnd(): Unit = { endTime = System.currentTimeMillis() }
 
-  def getTaskMeasures: Seq[TaskExecutionMeasures] = { taskMeasures.get }
+  def getTaskMeasures: Seq[TaskInstrumentationMeasures] = { taskMeasures.get }
 
   def validationDataCollectionTime(): Long = {
     if (validationDataCollectionStop == 0) 0
@@ -190,30 +194,30 @@ class ExecutionMeasures() extends Serializable {
 }
 
 trait LightGBMPerformance extends Serializable {
-  private var performanceMeasures: Option[Array[Option[ExecutionMeasures]]] = None
+  private var performanceMeasures: Option[Array[Option[InstrumentationMeasures]]] = None
 
   protected def initPerformanceMeasures(batchCount: Int): Unit = {
     performanceMeasures = Option(Array.fill(batchCount)(None))
   }
 
-  protected def setBatchPerformanceMeasure(index: Int, measures: ExecutionMeasures): Unit = {
+  protected def setBatchPerformanceMeasure(index: Int, measures: InstrumentationMeasures): Unit = {
     performanceMeasures.get(index) = Option(measures)
   }
 
-  protected def setBatchPerformanceMeasures(measures: Array[Option[ExecutionMeasures]]): this.type = {
+  protected def setBatchPerformanceMeasures(measures: Array[Option[InstrumentationMeasures]]): this.type = {
     // TODO throw if already set?
     performanceMeasures = Option(measures)
     this
   }
 
-  def getAllPerformanceMeasures: Option[Array[ExecutionMeasures]] = {
+  def getAllPerformanceMeasures: Option[Array[InstrumentationMeasures]] = {
     performanceMeasures.map(array => array.flatten)
   }
 
   /** In the common case of 1 batch, there is only 1 measure, so this is a convenience method.
     *
     */
-  def getPerformanceMeasures: Option[ExecutionMeasures] = {
+  def getPerformanceMeasures: Option[InstrumentationMeasures] = {
     performanceMeasures.flatMap(array => array(0))
   }
 }

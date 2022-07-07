@@ -5,18 +5,12 @@ package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.dataset._
 import com.microsoft.azure.synapse.ml.lightgbm.params.BaseTrainParams
-import com.microsoft.ml.lightgbm.lightgbmlib
-import org.apache.spark.sql.types.StructType
 import org.slf4j.Logger
 
 import java.util.concurrent.CountDownLatch
 import scala.collection.concurrent.TrieMap
 
-class SharedDatasetState(columnParams: ColumnParams,
-                         schema: StructType,
-                         trainParams: BaseTrainParams,
-                         isForValidation: Boolean,
-                         sharedState: SharedState) {
+class SharedDatasetState(trainParams: BaseTrainParams, isForValidation: Boolean) {
   val chunkSize: Int = trainParams.executionParams.chunkSize
   val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
   val matrixType: String = trainParams.executionParams.matrixType
@@ -25,8 +19,6 @@ class SharedDatasetState(columnParams: ColumnParams,
   val streamingRowOffsets = new TrieMap[Long, Long]()
 
   @volatile var streamingDataset: Option[LightGBMDataset] = None
-
-  private lazy val streamingPartitionDatasets = scala.collection.mutable.Map[Int, List[LightGBMDataset]]()
 
   lazy val denseAggregatedColumns: BaseDenseAggregatedColumns = new DenseSyncAggregatedColumns(chunkSize)
 
@@ -42,72 +34,15 @@ class SharedDatasetState(columnParams: ColumnParams,
       count
     }
   }
-
-  def addStreamingDataset(partition: Int, dataset: LightGBMDataset): Unit = {
-    this.synchronized {
-      if (streamingPartitionDatasets.contains(partition)) {
-        val currentList = streamingPartitionDatasets(partition)
-        streamingPartitionDatasets.update(partition, dataset +: currentList)
-      } else {
-        streamingPartitionDatasets += partition -> List(dataset)
-      }
-    }
-  }
-
-  def getSharedStreamingDatasets(): Array[LightGBMDataset] =
-  {
-    streamingPartitionDatasets.flatten(pair => pair._2).toArray
-  }
-
-  def getSharedStreamingDatasets(partitionIndex: Int): Array[LightGBMDataset] =
-  {
-    streamingPartitionDatasets(partitionIndex).toArray
-  }
-
-  def clearSharedStreamingDatasets(): Unit = {
-    streamingPartitionDatasets.clear()
-  }
-
-  def clearSharedStreamingDatasets(partitionIndex: Int): Unit = {
-    streamingPartitionDatasets.update(partitionIndex, List.empty[LightGBMDataset])
-  }
-
-  def freeSharedStreamingDatasets(): Unit = {
-    val allDatasets = getSharedStreamingDatasets()
-    allDatasets.foreach(ds => LightGBMUtils.validate(lightgbmlib.LGBM_DatasetFree(ds.datasetPtr),
-      "Dataset free"))
-  }
 }
 
-class SharedState(columnParams: ColumnParams,
-                  schema: StructType,
-                  trainParams: BaseTrainParams) {
-  val datasetState: SharedDatasetState = new SharedDatasetState(
-    columnParams,
-    schema,
-    trainParams,
-    isForValidation = false,
-    this)
-  val validationDatasetState: SharedDatasetState = new SharedDatasetState(
-    columnParams,
-    schema,
-    trainParams,
-    isForValidation = true,
-    this)
+class SharedState(trainParams: BaseTrainParams) {
+  val datasetState: SharedDatasetState = new SharedDatasetState(trainParams, isForValidation = false)
+  val validationDatasetState: SharedDatasetState = new SharedDatasetState(trainParams, isForValidation = true)
 
   @volatile var isSparse: Option[Boolean] = None
   @volatile var mainExecutorWorker: Option[Long] = None
   @volatile var validationDatasetWorker: Option[Long] = None
-
-  def getSharedTrainingDataset(): LightGBMDataset = {
-    // There should only be 1 Dataset in the array
-    datasetState.getSharedStreamingDatasets().head
-  }
-
-  def getSharedValidationDataset(): LightGBMDataset = {
-    // There should only be 1 Dataset in the array
-    validationDatasetState.getSharedStreamingDatasets().head
-  }
 
   def linkIsSparse(isSparse: Boolean): Unit = {
     if (this.isSparse.isEmpty) {

@@ -8,6 +8,7 @@ import com.microsoft.azure.synapse.ml.core.utils.{ClusterUtil, FaultToleranceUti
 import com.microsoft.azure.synapse.ml.lightgbm.NetworkManager.parseWorkerMessage
 import com.microsoft.ml.lightgbm.lightgbmlib
 import org.apache.spark.BarrierTaskContext
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.SparkSession
 import org.slf4j.Logger
 
@@ -55,8 +56,7 @@ object NetworkManager {
              spark: SparkSession,
              driverListenPort: Int,
              timeout: Double,
-             useBarrierExecutionMode: Boolean,
-             log: Logger): NetworkManager = {
+             useBarrierExecutionMode: Boolean): NetworkManager = {
     // Start a thread and open port to listen on
     implicit val context: ExecutionContextExecutor =
       ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor())
@@ -76,8 +76,7 @@ object NetworkManager {
       host,
       port,
       timeout,
-      useBarrierExecutionMode,
-      log)
+      useBarrierExecutionMode)
   }
 
   /** Retrieve the network nodes and current port information from the driver.
@@ -92,17 +91,18 @@ object NetworkManager {
     * @param shouldExecuteTraining True if the current worker will participate in the LightGBM training network.
     */
   def getGlobalNetworkInfo(ctx: TrainingContext,
+                           log: Logger,
                            partitionId: Int,
                            shouldExecuteTraining: Boolean,
-                           measures: TaskExecutionMeasures): NetworkTopologyInfo = {
+                           measures: TaskInstrumentationMeasures): NetworkTopologyInfo = {
     measures.markNetworkInitializationStart()
     val networkParams = ctx.networkParams
-    val out = using(findOpenPort(ctx).get) {
+    val out = using(findOpenPort(ctx, log).get) {
       openPort =>
         val localListenPort = openPort.getLocalPort
-        ctx.log.info(s"LightGBM task connecting to host: ${networkParams.ipAddress} and port: ${networkParams.port}")
+        log.info(s"LightGBM task connecting to host: ${networkParams.ipAddress} and port: ${networkParams.port}")
         FaultToleranceUtils.retryWithTimeout() {
-          getNetworkTopologyInfoFromDriver(networkParams, partitionId, localListenPort, ctx.log, shouldExecuteTraining)
+          getNetworkTopologyInfoFromDriver(networkParams, partitionId, localListenPort, log, shouldExecuteTraining)
         }
     }.get
     measures.markNetworkInitializationStop()
@@ -167,25 +167,28 @@ object NetworkManager {
     partitionList.split(",").map(str => str.toInt).sorted
   }
 
-  def initLightGBMNetwork(ctx: PartitionTaskContext, retry: Int, delay: Long): Unit = {
-    ctx.log.info(s"Calling NetworkInit on local port ${ctx.localListenPort} with value ${ctx.lightGBMNetworkString}")
+  def initLightGBMNetwork(ctx: PartitionTaskContext,
+                          log: Logger,
+                          retry: Int = LightGBMConstants.NetworkRetries,
+                          delay: Long = LightGBMConstants.InitialDelay): Unit = {
+    log.info(s"Calling NetworkInit on local port ${ctx.localListenPort} with value ${ctx.lightGBMNetworkString}")
     try {
       LightGBMUtils.validate(lightgbmlib.LGBM_NetworkInit(
         ctx.lightGBMNetworkString,
         ctx.localListenPort,
         LightGBMConstants.DefaultListenTimeout,
         ctx.lightGBMNetworkMachineCount), "Network init")
-      ctx.log.info(s"NetworkInit succeeded. LightGBM task listening on: ${ctx.localListenPort}")
+      log.info(s"NetworkInit succeeded. LightGBM task listening on: ${ctx.localListenPort}")
     } catch {
       case ex@(_: Exception | _: Throwable) =>
-        ctx.log.info(s"NetworkInit failed with exception on local port ${ctx.localListenPort} with exception: $ex")
+        log.info(s"NetworkInit failed with exception on local port ${ctx.localListenPort} with exception: $ex")
         Thread.sleep(delay)
         if (retry == 0) {
-          ctx.log.info(s"NetworkInit reached maximum exceptions on retry: $ex")
+          log.info(s"NetworkInit reached maximum exceptions on retry: $ex")
           throw ex
         }
-        ctx.log.info(s"Retrying NetworkInit with local port ${ctx.localListenPort}")
-        initLightGBMNetwork(ctx, retry - 1, delay * 2)
+        log.info(s"Retrying NetworkInit with local port ${ctx.localListenPort}")
+        initLightGBMNetwork(ctx, log, retry - 1, delay * 2)
     }
   }
 
@@ -210,15 +213,15 @@ object NetworkManager {
     mainPort.toInt
   }
 
-  def findOpenPort(ctx: TrainingContext): Option[Socket] = {
+  def findOpenPort(ctx: TrainingContext, log: Logger): Option[Socket] = {
     val defaultListenPort: Int = ctx.networkParams.defaultListenPort
-    val log = ctx.log
     val basePort = defaultListenPort + (LightGBMUtils.getWorkerId * ctx.numTasksPerExecutor)
     if (basePort > LightGBMConstants.MaxPort) {
       throw new Exception(s"Error: port $basePort out of range, possibly due to too many executors or unknown error")
     }
     var localListenPort = basePort
     var taskServerSocket: Option[Socket] = None
+
     @tailrec
     def findPort(): Unit = {
       try {
@@ -281,8 +284,7 @@ case class NetworkManager(numTasks: Int,
                           host: String,
                           port: Int,
                           timeout: Double,
-                          useBarrierExecutionMode: Boolean,
-                          log: Logger) {
+                          useBarrierExecutionMode: Boolean) extends Logging {
 
   // Arrays to store network topology in as it arrives
   private val hostAndPorts = ListBuffer[(Socket, String)]()
