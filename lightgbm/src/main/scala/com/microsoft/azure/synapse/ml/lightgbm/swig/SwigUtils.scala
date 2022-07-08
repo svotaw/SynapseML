@@ -97,8 +97,6 @@ class DoubleChunkedArray(array: doubleChunkedArray) extends ChunkedArray[Double]
 
   def add(value: Double): Unit = array.add(value)
 
-  def data(): SWIGTYPE_p_p_double = array.data()
-
   def delete(): Unit = array.delete()
 
   def coalesceTo(doubleSwigArray: DoubleSwigArray): Unit = array.coalesce_to(doubleSwigArray.array)
@@ -128,8 +126,6 @@ class IntChunkedArray(array: int32ChunkedArray) extends ChunkedArray[Int] {
     array.getitem(chunk, inChunkIdx, default)
 
   def add(value: Int): Unit = array.add(value)
-
-  def data(): SWIGTYPE_p_p_int = array.data()
 
   def delete(): Unit = array.delete()
 

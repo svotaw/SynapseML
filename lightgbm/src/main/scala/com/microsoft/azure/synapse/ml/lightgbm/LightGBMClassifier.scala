@@ -5,10 +5,7 @@ package com.microsoft.azure.synapse.ml.lightgbm
 
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
 import com.microsoft.azure.synapse.ml.lightgbm.params.{
-  BaseTrainParams,
-  ClassifierTrainParams,
-  LightGBMModelParams,
-  LightGBMPredictionParams}
+  BaseTrainParams, ClassifierTrainParams, LightGBMModelParams, LightGBMPredictionParams}
 import com.microsoft.azure.synapse.ml.logging.BasicLogging
 import org.apache.spark.ml.classification.{ProbabilisticClassificationModel, ProbabilisticClassifier}
 import org.apache.spark.ml.linalg.{Vector, Vectors}
@@ -43,9 +40,7 @@ class LightGBMClassifier(override val uid: String)
   def getIsUnbalance: Boolean = $(isUnbalance)
   def setIsUnbalance(value: Boolean): this.type = set(isUnbalance, value)
 
-  def getTrainParams(numTasks: Int,
-                     featuresSchema: StructField,
-                     numTasksPerExec: Int): BaseTrainParams = {
+  def getTrainParams(numTasks: Int, featuresSchema: StructField, numTasksPerExec: Int): BaseTrainParams = {
     ClassifierTrainParams(
       get(passThroughArgs),
       getIsUnbalance,

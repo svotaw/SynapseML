@@ -14,8 +14,6 @@ name := "synapseml"
 ThisBuild / organization := "com.microsoft.azure"
 ThisBuild / scalaVersion := "2.12.15"
 
-// Compile / unmanagedJars += file("lib/lightgbmlib.jar")
-
 val scalaMajorVersion = 2.12
 
 val excludes = Seq(

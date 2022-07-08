@@ -3,7 +3,6 @@
 
 package com.microsoft.azure.synapse.ml.lightgbm
 
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils.getArrayType
 import com.microsoft.azure.synapse.ml.lightgbm.dataset._
 import org.apache.spark.sql._
 
@@ -17,7 +16,7 @@ class BulkPartitionTask extends BasePartitionTask {
     // For useSingleDataset mode, we need to add to bulk synchronization stops
     if (ctx.trainingCtx.useSingleDatasetMode) {
       ctx.sharedState.incrementArrayProcessedSignal(log)
-      if (!ctx.isMainWorker) ctx.sharedState.incrementDataPrepDoneSignal(log)
+      if (ctx.isHelperWorkerOnly) ctx.sharedState.incrementDataPrepDoneSignal(log)
     }
 
     ctx
@@ -122,21 +121,5 @@ class BulkPartitionTask extends BasePartitionTask {
     ts.release()
 
     aggregatedColumns
-  }
-
-  private def determineMatrixType(ctx: PartitionTaskContext,
-                                  inputRows: Iterator[Row]): PeekingIterator[Row] = {
-    if (ctx.sharedState.isSparse.isDefined) new PeekingIterator(inputRows)
-    else {
-      val (concatRowsIter: Iterator[Row], isSparseHere: Boolean) =
-        getArrayType(
-          inputRows,
-          ctx.trainingCtx.trainingParams.executionParams.matrixType,
-          ctx.trainingCtx.columnParams.featuresColumn)
-      val peekingIter = new PeekingIterator(concatRowsIter)
-      // Note: the first worker gets to officially set "is sparse", other workers read it
-      ctx.sharedState.linkIsSparse(isSparseHere)
-      peekingIter
-    }
   }
 }

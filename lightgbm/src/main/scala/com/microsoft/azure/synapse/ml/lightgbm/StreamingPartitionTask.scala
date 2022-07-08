@@ -100,18 +100,15 @@ case class StreamingState(ctx: PartitionTaskContext,
   */
 class StreamingPartitionTask extends BasePartitionTask {
   override protected def initializeInternal(ctx: PartitionTaskContext): PartitionTaskContext = {
+    // First dataset to reach here calculates the validation Dataset if needed
     val shouldCalcValidationData =
       if (ctx.trainingCtx.hasValidationData) {
         ctx.sharedState.linkValidationDatasetWorker()
         ctx.sharedState.validationDatasetWorker.get == LightGBMUtils.getTaskId
       } else false
 
-    // Update the row count for the tasks in this executor
-    val rowCount = ctx.trainingCtx.partitionCounts.get(ctx.partitionId)
-    ctx.sharedState.datasetState.streamingRowCounts.update(ctx.partitionId, rowCount)
-
     // Streaming always uses 1 Dataset per executor, so we need to add to synchronization stop
-    if (!ctx.isMainWorker) ctx.sharedState.incrementDataPrepDoneSignal(log)
+    if (ctx.isHelperWorkerOnly) ctx.sharedState.incrementDataPrepDoneSignal(log)
 
     ctx.setShouldCalcValidationData(shouldCalcValidationData)
   }
@@ -127,15 +124,8 @@ class StreamingPartitionTask extends BasePartitionTask {
       ctx.sharedState.helperStartSignal.await()
     }
 
-    // Make sure isSparse is set with a value
-    val rowIterator = if (ctx.sharedState.isSparse.isEmpty) {
-      val (newRowsIter: Iterator[Row], isSparseHere: Boolean) =
-        getArrayType(inputRows,
-          ctx.trainingCtx.trainingParams.executionParams.matrixType,
-          ctx.trainingCtx.columnParams.featuresColumn)
-      ctx.sharedState.linkIsSparse(isSparseHere)
-      newRowsIter
-    } else inputRows
+    // Make sure isSparse is set with a value and get an adjusted iterator (might have had to sample)
+    val rowIterator = determineMatrixType(ctx, inputRows)
 
     insertRowsIntoTrainingDataset(ctx, rowIterator)
 
@@ -210,41 +200,6 @@ class StreamingPartitionTask extends BasePartitionTask {
       state.delete()
     }
   }
-
-  /* TODO decide fate of this method
-  @tailrec
-  private def createDatasetChunks(ctx: PartitionTaskContext,
-                                  inputRows: Iterator[Row],
-                                  sharedDatasetState: SharedDatasetState,
-                                  chunkSize: Int): Unit = {
-    // Generate the "empty" dataset
-    val isSparse = ctx.sharedState.isSparse.get
-    ctx.log.info(s"LightGBM task creating Dataset in partition ${ctx.partitionId}, size $chunkSize, sparse: $isSparse")
-    val dataset = getReferenceDataset(ctx, chunkSize)
-
-    // Initialize state buffers, and load 1 dataset chunk.
-    // If we run out of rows, the dataset is "partial", but that is tracked in the LightBGM layer as num_pushed_rows()
-    val state = StreamingState(ctx, dataset)
-    try {
-      if (ctx.sharedState.isSparse.get)
-        pushSparseMicroBatches(state, chunkSize, inputRows, 0)
-      else
-        pushDenseMicroBatches(state, chunkSize, inputRows, 0)
-    } finally {
-      state.delete()
-    }
-
-    // Now store it in the shared state for use later by whatever thread will make the final dataset used for training
-    sharedDatasetState.addStreamingDataset(ctx.partitionId, dataset)
-
-    // If there are still more rows in the partition, create another dataset.
-    // Ideally we'd always make 1 dataset, but this gives us the flexibility to be off a little for any reason.
-    // Even 1 extra row will get its own dataset and then be coalesced later.
-    if (inputRows.hasNext) {
-      ctx.log.info(s"LightGBM task creating more Datasets in partition ${ctx.partitionId}")
-      createDatasetChunks(ctx, inputRows, sharedDatasetState, chunkSize)
-    }
-  } */
 
   @tailrec
   private def pushDenseMicroBatches(state: StreamingState,

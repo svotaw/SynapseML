@@ -29,10 +29,10 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
 
   /** Trains the LightGBM model.  If batches are specified, breaks training dataset into batches for training.
     *
-    * @param allTrainingData The input dataset to train.
+    * @param dataset The input dataset to train.
     * @return The trained model.
     */
-  protected def train(allTrainingData: Dataset[_]): TrainedModel = {
+  protected def train(dataset: Dataset[_]): TrainedModel = {
     LightGBMUtils.initializeNativeLibrary()
 
     val isMultiBatch = getNumBatches > 0
@@ -40,10 +40,10 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     setBatchPerformanceMeasures(Array.fill(numBatches)(None))
 
     logTrain({
-      getOptGroupCol.foreach(DatasetUtils.validateGroupColumn(_, allTrainingData.schema))
+      getOptGroupCol.foreach(DatasetUtils.validateGroupColumn(_, dataset.schema))
       if (isMultiBatch) {
         val ratio = 1.0 / numBatches
-        val datasetBatches = allTrainingData.randomSplit((0 until getNumBatches).map(_ => ratio).toArray)
+        val datasetBatches = dataset.randomSplit((0 until getNumBatches).map(_ => ratio).toArray)
         datasetBatches.zipWithIndex.foldLeft(None: Option[TrainedModel]) { (model, datasetWithIndex) =>
           if (model.isDefined) {
             setModelString(stringFromTrainedModel(model.get))
@@ -58,7 +58,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
           Some(newModel)
         }.get
       } else {
-        trainOneDataBatch(allTrainingData, batchIndex = 0)
+        trainOneDataBatch(dataset, batchIndex = 0)
       }
     })
   }
@@ -105,8 +105,8 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     ).toDF()
   }
 
-    protected def prepareDataframe(dataset: Dataset[_], numTasks: Int): DataFrame = {
-      val df = castColumns(dataset, getTrainingCols)
+  protected def prepareDataframe(dataset: Dataset[_], numTasks: Int): DataFrame = {
+    val df = castColumns(dataset, getTrainingCols)
     // Reduce number of partitions to number of executor tasks
     /* Note: with barrier execution mode we must use repartition instead of coalesce when
      * running on spark standalone.
@@ -309,11 +309,11 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       if (getUseSingleDatasetMode) get(numThreads).getOrElse(numTasksPerExec - 1)
       else getNumThreads
     ExecutionParams(getChunkSize,
-      getMatrixType,
-      execNumThreads,
-      getExecutionMode,
-      getMicroBatchSize,
-      getUseSingleDatasetMode)
+                    getMatrixType,
+                    execNumThreads,
+                    getExecutionMode,
+                    getMicroBatchSize,
+                    getUseSingleDatasetMode)
   }
 
   /**
@@ -378,7 +378,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       .appendParamValueIfNotThere("data_random_seed", get(dataRandomSeed).orElse(get(seed)))
       .result()
 
-    // TODO do we need to add any of the new Dataset parameters here? (e.g. is_enable_sparse) check
+    // TODO do we need to add any of the new Dataset parameters here? (e.g. is_enable_sparse)
   }
 
   /**
@@ -428,7 +428,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       else (None, None)
 
     validateSlotNames(featuresSchema)
-    driverInitAndTrain(
+    executeTraining(
       preprocessedDF,
       validationData,
       broadcastedSampleData,
@@ -550,21 +550,30 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * Run a parallel job via map partitions to initialize the native library and network,
     * translate the data to the LightGBM in-memory representation and train the models.
     *
-    * @param dataframe    The dataset to train on.
+    * @param dataframe The dataset to train on.
+    * @param validationData The dataset to use as validation. (optional)
+    * @param broadcastedSampleData Sample data to use for streaming mode Dataset creation (optional).
+    * @param partitionCounts The count per partition for streaming mode (optional).
+    * @param trainParams Training parameters.
+    * @param numCols Number of columns.
+    * @param numInitValueClasses Number of classes for initial values (used only for multiclass).
     * @param batchIndex In running in batch training mode, gets the batch number.
+    * @param numTasks Number of tasks/partitions.
+    * @param numTasksPerExecutor Number of tasks per executor.
+    * @param measures Instrumentation measures to populate.
     * @return The LightGBM Model from the trained LightGBM Booster.
     */
-  protected def driverInitAndTrain(dataframe: DataFrame,
-                                   validationData: Option[Broadcast[Array[Row]]],
-                                   broadcastedSampleData: Option[Broadcast[Array[Row]]],
-                                   partitionCounts: Option[Array[Long]],
-                                   trainParams: BaseTrainParams,
-                                   numCols: Int,
-                                   numInitValueClasses: Int,
-                                   batchIndex: Int,
-                                   numTasks: Int,
-                                   numTasksPerExecutor: Int,
-                                   measures: InstrumentationMeasures): TrainedModel = {
+  protected def executeTraining(dataframe: DataFrame,
+                                validationData: Option[Broadcast[Array[Row]]],
+                                broadcastedSampleData: Option[Broadcast[Array[Row]]],
+                                partitionCounts: Option[Array[Long]],
+                                trainParams: BaseTrainParams,
+                                numCols: Int,
+                                numInitValueClasses: Int,
+                                batchIndex: Int,
+                                numTasks: Int,
+                                numTasksPerExecutor: Int,
+                                measures: InstrumentationMeasures): TrainedModel = {
     val networkManager = NetworkManager.create(numTasks,
                                                dataframe.sparkSession,
                                                getDriverListenPort,
@@ -582,7 +591,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
                                  networkManager)
 
     // Execute the Tasks on workers
-    val lightGBMBooster = executeTrainingFromDriver(ctx, dataframe, measures)
+    val lightGBMBooster = executePartitionTasks(ctx, dataframe, measures)
 
     // Wait for network to complete (should be done by now)
     networkManager.waitForNetworkCommunicationsDone()
@@ -592,9 +601,9 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     model
   }
 
-  protected def executeTrainingFromDriver(ctx: TrainingContext,
-                                         dataframe: DataFrame,
-                                         measures: InstrumentationMeasures): LightGBMBooster = {
+  protected def executePartitionTasks(ctx: TrainingContext,
+                                      dataframe: DataFrame,
+                                      measures: InstrumentationMeasures): LightGBMBooster = {
     // Create the object that will manage the mapPartitions function
     val workerTaskHandler: BasePartitionTask = if (ctx.isStreaming) new StreamingPartitionTask()
     else new BulkPartitionTask()
@@ -617,8 +626,16 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     * Get the object that holds all relevant context information for the training session.
     *
     * @param dataframe    The dataset to train on.
+    * @param validationData The dataset to use as validation. (optional)
+    * @param broadcastedSampleData Sample data to use for streaming mode Dataset creation (optional).
+    * @param partitionCounts The count per partition for streaming mode (optional).
+    * @param trainParams Training parameters.
+    * @param numCols Number of columns.
+    * @param numInitValueClasses Number of classes for initial values (used only for multiclass).
     * @param batchIndex In running in batch training mode, gets the batch number.
-    * @return The LightGBM Model from the trained LightGBM Booster.
+    * @param numTasksPerExecutor Number of tasks per executor.
+    * @param networkManager The network manager.
+    * @return The context of the training session.
     */
   protected def getTrainingContext(dataframe: DataFrame,
                                    validationData: Option[Broadcast[Array[Row]]],
@@ -641,19 +658,19 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       trainParams.executionParams.numThreads)
 
     TrainingContext(batchIndex, // TODO log this context?
-      sharedState,
-      dataframe.schema,
-      numCols,
-      numInitValueClasses,
-      trainParams,
-      networkParams,
-      getColumnParams,
-      datasetParams,
-      getSlotNamesWithMetadata(dataframe.schema(getFeaturesCol)),
-      numTasksPerExecutor,
-      validationData,
-      broadcastedSampleData,
-      partitionCounts)
+                    sharedState,
+                    dataframe.schema,
+                    numCols,
+                    numInitValueClasses,
+                    trainParams,
+                    networkParams,
+                    getColumnParams,
+                    datasetParams,
+                    getSlotNamesWithMetadata(dataframe.schema(getFeaturesCol)),
+                    numTasksPerExecutor,
+                    validationData,
+                    broadcastedSampleData,
+                    partitionCounts)
   }
 
   /** Optional group column for Ranking, set to None by default.

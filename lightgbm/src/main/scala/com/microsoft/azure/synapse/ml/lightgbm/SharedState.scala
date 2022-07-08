@@ -8,15 +8,11 @@ import com.microsoft.azure.synapse.ml.lightgbm.params.BaseTrainParams
 import org.slf4j.Logger
 
 import java.util.concurrent.CountDownLatch
-import scala.collection.concurrent.TrieMap
 
 class SharedDatasetState(trainParams: BaseTrainParams, isForValidation: Boolean) {
   val chunkSize: Int = trainParams.executionParams.chunkSize
   val useSingleDataset: Boolean = trainParams.executionParams.useSingleDatasetMode
   val matrixType: String = trainParams.executionParams.matrixType
-
-  val streamingRowCounts = new TrieMap[Long, Long]()
-  val streamingRowOffsets = new TrieMap[Long, Long]()
 
   @volatile var streamingDataset: Option[LightGBMDataset] = None
 

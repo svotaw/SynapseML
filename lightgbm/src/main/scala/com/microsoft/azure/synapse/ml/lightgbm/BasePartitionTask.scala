@@ -6,12 +6,12 @@ package com.microsoft.azure.synapse.ml.lightgbm
 import com.microsoft.azure.synapse.ml.lightgbm.LightGBMUtils._
 import com.microsoft.azure.synapse.ml.lightgbm.TrainUtils._
 import com.microsoft.azure.synapse.ml.lightgbm.booster.LightGBMBooster
-import com.microsoft.azure.synapse.ml.lightgbm.dataset.{BaseAggregatedColumns, LightGBMDataset}
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.DatasetUtils.getArrayType
+import com.microsoft.azure.synapse.ml.lightgbm.dataset.{BaseAggregatedColumns, LightGBMDataset, PeekingIterator}
 import com.microsoft.azure.synapse.ml.lightgbm.params.BaseTrainParams
 import com.microsoft.ml.lightgbm.lightgbmlib
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql._
-import org.slf4j.Logger
 
 import scala.language.existentials
 
@@ -23,7 +23,7 @@ case class PartitionResult(booster: Option[LightGBMBooster],
 
 /**
   * Object to encapsulate all intermediate data calculations.
-  * Note tha only bulk uses these properties, but BasePartitionTask uses this class for consistent interfaces.
+  * Note tha only bulk mode uses these properties, but BasePartitionTask uses this class for consistent interfaces.
   */
 case class PartitionDataState(aggregatedTrainingData: Option[BaseAggregatedColumns],
                               aggregatedValidationData: Option[BaseAggregatedColumns])
@@ -37,12 +37,12 @@ case class PartitionTaskTrainingState(ctx: PartitionTaskContext,
   lazy val evalCounts: Int = evalNames.length
   lazy val bestScore = new Array[Double](evalCounts)
   lazy val bestScores = new Array[Array[Double]](evalCounts)
-  lazy val bestIter = new Array[Int](evalCounts)
+  lazy val bestIteration = new Array[Int](evalCounts)
 
   var iteration: Int = 0
   var isFinished: Boolean = false
   var learningRate: Double = ctx.trainingCtx.trainingParams.generalParams.learningRate
-  var bestIterResult: Option[Int] = None
+  var bestIterationResult: Option[Int] = None
 }
 
 /**
@@ -53,15 +53,16 @@ case class PartitionTaskContext(trainingCtx: TrainingContext,
                                 taskId: Long,
                                 measures: TaskInstrumentationMeasures,
                                 networkTopologyInfo: NetworkTopologyInfo,
-                                isMainWorker: Boolean,
                                 shouldExecuteTraining: Boolean,
                                 isEmptyPartition: Boolean,
                                 shouldReturnBooster: Boolean) {
-  // Extra info that is settable by custom execution modes
+  // custom properties set by particular modes
   private val customJobCount = 2
   private val shouldCalcValidationDataInfoId = 0
   private val shouldCalcExecutorDatasetInfoId = 1
   private val customModeInfo: Array[Boolean] = Array.fill(customJobCount)(false)
+
+  val isHelperWorkerOnly: Boolean = !shouldExecuteTraining && !isEmptyPartition
 
   val lightGBMNetworkString: String = networkTopologyInfo.lightgbmNetworkString
   val localListenPort: Int = networkTopologyInfo.localListenPort
@@ -84,12 +85,14 @@ case class PartitionTaskContext(trainingCtx: TrainingContext,
   def shouldCalcExecutorDataset: Boolean = customModeInfo(shouldCalcExecutorDatasetInfoId)
 
   lazy val streamingExecutorRowCount: Int = {
+    // Use the map of all partition counts and the map of partitions on this executor to get local count
     val allPartitionRowCounts = trainingCtx.partitionCounts.get
     networkTopologyInfo.executorPartitionIdList
       .map(partitionId => allPartitionRowCounts(partitionId)).sum.toInt
   }
 
   lazy val streamingPartitionOffset: Int = {
+    // Use the map of all partition counts and the map of partitions on this executor to get this partition offset
     val allPartitionRowCounts = trainingCtx.partitionCounts.get
     networkTopologyInfo.executorPartitionIdList.filter(id => id < partitionId)
       .map(partitionId => allPartitionRowCounts(partitionId)).sum.toInt
@@ -149,24 +152,23 @@ abstract class BasePartitionTask extends Serializable with Logging {
     * Perform task initialization.
     * @param ctx The training context.
     * @param inputRows The Spark rows for a partition as an iterator.
-    * @return Information about the context of the task execution.
+    * @return Information about the context of this task's execution.
     */
   private def initialize(ctx: TrainingContext, inputRows: Iterator[Row]): PartitionTaskContext = {
     val partitionId = getPartitionId
     val taskMeasures = new TaskInstrumentationMeasures(partitionId)
     taskMeasures.markInitializationStart()
     val taskId = LightGBMUtils.getTaskId
-    // TODO put back  if (ctx.trainingParams.generalParams.verbosity > 1)
+    if (ctx.trainingParams.generalParams.verbosity > 1)
       log.info(s"Initializing partition $partitionId and taskId $taskId running on executor $getExecutorId")
     val isEmptyPartition = !inputRows.hasNext
     // Note: the first valid worker with non-empty partitions sets the main executor worker, other workers read it
     if (!isEmptyPartition) ctx.sharedState().linkMainExecutorWorker()
 
-    val mainExecutorWorkerId = if (isEmptyPartition) -1 else ctx.sharedState().mainExecutorWorker.get
-    val isMainWorker = mainExecutorWorkerId == taskId
+    val mainExecutorWorkerId = ctx.sharedState().mainExecutorWorker.getOrElse(-1)  // can be empty if empty partition
     val shouldExecuteTraining: Boolean =  if (isEmptyPartition) false
       else if (!ctx.useSingleDatasetMode) true
-      else isMainWorker
+      else mainExecutorWorkerId == taskId
 
     if (ctx.useSingleDatasetMode)
       log.info(s"Using singleDatasetMode. Task: $taskId, PartId: $partitionId. Main task: $mainExecutorWorkerId")
@@ -184,15 +186,14 @@ abstract class BasePartitionTask extends Serializable with Logging {
 
     log.info(s"Initializing custom partition $partitionId and taskId $taskId running on executor $getExecutorId")
     val taskCtx: PartitionTaskContext = initializeInternal(PartitionTaskContext(ctx,
-                                                           partitionId,
-                                                           taskId,
-                                                           taskMeasures,
-                                                           networkInfo,
-                                                           isMainWorker,
-                                                           shouldExecuteTraining,
-                                                           isEmptyPartition,
-                                                           shouldReturnBooster))
-    // TODO put back  if (ctx.trainingParams.generalParams.verbosity > 1)
+                                                                                partitionId,
+                                                                                taskId,
+                                                                                taskMeasures,
+                                                                                networkInfo,
+                                                                                shouldExecuteTraining,
+                                                                                isEmptyPartition,
+                                                                                shouldReturnBooster))
+    if (ctx.trainingParams.generalParams.verbosity > 1)
       log.info(s"Done initializing partition $partitionId and taskId $taskId running on executor $getExecutorId")
     taskMeasures.markInitializationStop()
     taskCtx
@@ -237,7 +238,7 @@ abstract class BasePartitionTask extends Serializable with Logging {
         val state = PartitionTaskTrainingState(ctx, booster)
         try {
           val bestIterResult = executeTrainingIterations(state, log)
-          getReturnBoosterAsIterator(state, bestIterResult)
+          getPartitionTaskResult(state, bestIterResult)
         } finally {
           // Free booster
           state.booster.freeNativeMemory()
@@ -252,7 +253,7 @@ abstract class BasePartitionTask extends Serializable with Logging {
 
   /** Cleanup the task
     *
-    * @param ctx The training context.
+    * @param ctx The task context information.
     */
   private def cleanup(ctx: PartitionTaskContext): Unit = {
     log.info(s"Beginning cleanup for partition ${ctx.partitionId}")
@@ -268,7 +269,7 @@ abstract class BasePartitionTask extends Serializable with Logging {
 
   /**
     * Initialize and customize the context for the task.
-    * @param ctx The training context.
+    * @param ctx The task context information.
     * @return The updated context information for the task.
     */
   protected def initializeInternal(ctx: PartitionTaskContext): PartitionTaskContext = {
@@ -277,7 +278,7 @@ abstract class BasePartitionTask extends Serializable with Logging {
 
   /**
     * Prepare any data objects for this particular partition.  Implement for specific execution modes.
-    * @param ctx The training context.
+    * @param ctx The task context information.
     * @param inputRows The Spark rows for a partition as an iterator.
     * @return Any intermediate data state (used mainly by bulk execution mode) to pass to future stages.
     */
@@ -289,12 +290,12 @@ abstract class BasePartitionTask extends Serializable with Logging {
     * @param dataState Any intermediate data state (used mainly by bulk execution mode).
     * @param forValidation Whether to generate the final training dataset or the validation dataset.
     * @param referenceDataset A reference dataset to start with (used mainly for validation dataset).
+    * @return LightGBM dataset Java wrapper.
     */
   protected def generateFinalDatasetInternal(ctx: PartitionTaskContext,
                                              dataState: PartitionDataState,
                                              forValidation: Boolean,
                                              referenceDataset: Option[LightGBMDataset]): LightGBMDataset
-
 
   /** Cleanup the task
     *
@@ -341,8 +342,30 @@ abstract class BasePartitionTask extends Serializable with Logging {
     dataset
   }
 
-  private def getReturnBoosterAsIterator(state: PartitionTaskTrainingState,
-                                         bestIterationResult: Option[Int]) = {
+  protected def determineMatrixType(ctx: PartitionTaskContext,
+                                    inputRows: Iterator[Row]): PeekingIterator[Row] = {
+    if (ctx.sharedState.isSparse.isDefined) new PeekingIterator(inputRows)
+    else {
+      val (concatRowsIterator: Iterator[Row], isSparseHere: Boolean) =
+        getArrayType(
+          inputRows,
+          ctx.trainingCtx.trainingParams.executionParams.matrixType,
+          ctx.trainingCtx.columnParams.featuresColumn)
+      val peekingIterator = new PeekingIterator(concatRowsIterator)
+      // Note: the first worker gets to officially set "is sparse", other workers read it
+      ctx.sharedState.linkIsSparse(isSparseHere)
+      peekingIterator
+    }
+  }
+
+  /**
+    * Get the partition task result in the form of an iterator.
+    * @param state The state information for the task.
+    * @param bestIterationResult The index of the best iteration.
+    * @return The result of the task as an iterator to pass back to the driver.
+    */
+  private def getPartitionTaskResult(state: PartitionTaskTrainingState,
+                                     bestIterationResult: Option[Int]): Iterator[PartitionResult] = {
     if (state.ctx.shouldReturnBooster) {
       val model = state.booster.saveToString(bestIterationResult)
       val modelBooster = new LightGBMBooster(model)

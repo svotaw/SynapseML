@@ -4,10 +4,11 @@
 package com.microsoft.azure.synapse.ml.core.utils
 
 import java.net.InetAddress
+
 import org.apache.http.conn.util.InetAddressUtils
 import org.apache.spark.SparkContext
 import org.apache.spark.injections.BlockManagerUtils
-import org.apache.spark.sql.{Dataset, SparkSession}
+import org.apache.spark.sql.SparkSession
 import org.slf4j.Logger
 
 object ClusterUtil {

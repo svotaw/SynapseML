@@ -268,155 +268,6 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
     numTasks.foreach(nTasks => assertFitWithoutErrors(baseModel.setNumTasks(nTasks), pimaDF))
   }
 
-  test("Verify performance measures") {
-    val Array(train, _) = taskDF.randomSplit(Array(0.8, 0.2), seed)
-    // TODO How does this make fresh copy?
-    val measuredModel = baseModel.setUseSingleDatasetMode(false).setExecutionMode("streaming").setMatrixType("dense")
-    val _ = measuredModel.fit(train)
-    val measuresOpt =  measuredModel.getPerformanceMeasures
-
-    assert(measuresOpt.isDefined)
-    val measures = measuresOpt.get
-    val totalTime = measures.totalTime
-    assert(totalTime > 0)
-    println(s"Total time: $totalTime")
-    val columnStatisticsTime = measures.columnStatisticsTime
-    assert(columnStatisticsTime > 0)
-    println(s"Column statistics time: $columnStatisticsTime")
-    val rowStatisticsTime = measures.rowStatisticsTime
-    println(s"Row statistics time: $rowStatisticsTime")
-    val trainingTime = measures.trainingTime
-    assert(trainingTime > 0)
-    println(s"Training time: $trainingTime")
-
-    val taskTimes = measures.taskTotalTimes()
-    assert(taskTimes.nonEmpty)
-    taskTimes.foreach(t => assert(t > 0))
-    println(s"Task total times: ${taskTimes.mkString(",")}")
-    val taskDataPreparationTimes = measures.taskDataPreparationTimes()
-    assert(taskDataPreparationTimes.nonEmpty)
-    taskDataPreparationTimes.foreach(t => assert(t > 0))
-    println(s"Task data preparation times: ${taskDataPreparationTimes.mkString(",")}")
-    val taskDatasetCreationTimes = measures.taskDatasetCreationTimes()
-    assert(taskDatasetCreationTimes.nonEmpty)
-    assert(taskDatasetCreationTimes.sum > 0)
-    println(s"Task dataset creation times: ${taskDatasetCreationTimes.mkString(",")}")
-    val taskTrainingIterationTimes = measures.taskTrainingIterationTimes()
-    assert(taskTrainingIterationTimes.nonEmpty)
-    // TODO assert(taskTrainingIterationTimes.sum > 0)
-    println(s"Task training iteration times: ${taskTrainingIterationTimes.mkString(",")}")
-
-    val tasks = measures.getTaskMeasures
-    val activeTasks = tasks.filter(t => t.isActiveTrainingTask).map(t => t.partitionId)
-    println(s"Active task ids: ${activeTasks.mkString(",")}")
-
-
-    // TODO verify all diff measures that are 0 by default
-  }
-
-  test("Performance testing") {
-    // modify this test for getting some simple performance measures
-    val dataset = taskDF
-    val measurementCount = 1
-    val executionModes = Array("streaming")  // streaming, bulk
-    val microBatchSizes = Array(4000) // 1, 2, 4, 8, 16, 32, 100, 1000)
-    val matrixTypes = Array("dense")  // dense, sparse, auto
-    val useSingleDatasetModes = Array(true)
-
-    executionModes.foreach(executionMode => {
-      matrixTypes.foreach(matrixType => {
-        microBatchSizes.foreach(microBatchSize => {
-          useSingleDatasetModes.foreach(useSingleDataset => {
-            println(s"*********************************************************************************************")
-            println(s"**** Start ExecutionMode: $executionMode, MatrixType: $matrixType, " +
-              s"useSingleDataset: $useSingleDataset, MicroBatchSize: $microBatchSize")
-            measurePerformance(dataset, measurementCount, executionMode, microBatchSize, matrixType, useSingleDataset)
-            println(s"**** Done ExecutionMode: $executionMode, MatrixType: $matrixType, " +
-              s"useSingleDataset: $useSingleDataset, MicroBatchSize: $microBatchSize")
-            println(s"*********************************************************************************************")
-          })
-        })
-      })
-    })
-  }
-
-  def measurePerformance(df: DataFrame,
-                         measurementCount: Int,
-                         executionMode: String,
-                         microBatchSize: Int,
-                         matrixType: String,
-                         useSingleDataset: Boolean): Unit = {
-    val Array(train, _) = df.randomSplit(Array(0.8, 0.2), seed)
-    val measurements = Array.ofDim[InstrumentationMeasures](measurementCount)
-
-    (0 until measurementCount).foreach(i => {
-      println(s"** Start Measurement $i")
-
-      val measuredModel = baseModel
-        .setUseSingleDatasetMode(useSingleDataset)
-        .setExecutionMode(executionMode)
-        .setMatrixType(matrixType)
-        .setMicroBatchSize(microBatchSize)
-
-      val _ = measuredModel.fit(train)
-      measurements(i) = measuredModel.getPerformanceMeasures.get
-      println(s"Total time, ${measurements(i).totalTime}")
-      println(s"Column statistics, ${measurements(i).columnStatisticsTime}")
-      println(s"Row statistics time, ${measurements(i).rowStatisticsTime}")
-      println(s"Row count time, ${measurements(i).rowCountTime()}")
-      println(s"Sampling time, ${measurements(i).samplingTime()}")
-      println(s"Training time, ${measurements(i).trainingTime}")
-      println(s"Overhead time, ${measurements(i).overheadTime}")
-      println(s"Task total times, ${measurements(i).taskTotalTimes.mkString(",")}")
-      println(s"Task overhead times, ${measurements(i).taskOverheadTimes().mkString(",")}")
-      println(s"Task initialization times, ${measurements(i).taskInitializationTimes().mkString(",")}")
-      println(s"Task library initialization times, ${measurements(i).taskLibraryInitializationTimes().mkString(",")}")
-      println(s"Task network initialization times, ${measurements(i).taskNetworkInitializationTimes().mkString(",")}")
-      println(s"Task data preparation times, ${measurements(i).taskDataPreparationTimes.mkString(",")}")
-      println(s"Task dataset wait times, ${measurements(i).taskWaitTimes().mkString(",")}")
-      println(s"Task dataset creation times, ${measurements(i).taskDatasetCreationTimes.mkString(",")}")
-      println(s"Task training iteration times, ${measurements(i).taskTrainingIterationTimes.mkString(",")}")
-      println(s"Task cleanup times, ${measurements(i).taskCleanupTimes().mkString(",")}")
-      println(s"** Completed Measurement $i")
-    })
-    println(s"***** Averaged results for $measurementCount runs")
-    var median = getMedian(measurements.map(m => m.totalTime))
-    println(s"Median Total time, $median")
-    median = getMedian(measurements.map(m => m.columnStatisticsTime))
-    println(s"Median Column statistics, $median")
-    median = getMedian(measurements.map(m => m.rowCountTime()))
-    println(s"Median Row count time, $median")
-    median = getMedian(measurements.map(m => m.samplingTime()))
-    println(s"Median Sampling time, $median")
-    median = getMedian(measurements.map(m => m.rowStatisticsTime()))
-    println(s"Median Row statistics time, $median")
-    median = getMedian(measurements.map(m => m.trainingTime))
-    println(s"Median Training time, $median")
-    median = getMedian(measurements.map(m => m.overheadTime))
-    println(s"Median Overhead time, $median")
-    var medianMax = getMedian(measurements.map(m => m.taskTotalTimes.max))
-    println(s"Median-max Task total times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskOverheadTimes().max))
-    println(s"Median-max Task overhead times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskInitializationTimes().max))
-    println(s"Median-max Task initialization times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskDataPreparationTimes.max))
-    println(s"Median-max Task data preparation times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskDatasetCreationTimes.max))
-    println(s"Median-max Task dataset creation times, $medianMax")
-    medianMax = getMedian(measurements.map(m => m.taskTrainingIterationTimes.max))
-    println(s"Median-max Task training iteration times, $medianMax")
-  }
-
-  def getMedian[T: Ordering](seq: Seq[T])(implicit conv: T => Float, f: Fractional[Float]): Float = {
-    val sortedSeq = seq.sorted
-    if (seq.size % 2 == 1) sortedSeq(sortedSeq.size / 2)  else {
-      val (up, down) = sortedSeq.splitAt(seq.size / 2)
-      import f._
-      (conv(up.last) + conv(down.head)) / fromInt(2)
-    }
-  }
-
   test("Verify LightGBM Classifier with max delta step parameter") {
     // If the max delta step is specified, assert AUC differs (assert parameter works)
     // Note: the final max output of leaves is learning_rate * max_delta_step, so param should reduce the effect
@@ -486,8 +337,6 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
         .setLearningRate(0.9)
         .setMinDataInLeaf(2)
         .setValidationIndicatorCol(validationCol)
-        .setUseBarrierExecutionMode(true) // added for DEBUG, so remove
-        .setUseSingleDatasetMode(true) // added for DEBUG, so remove
         .setEarlyStoppingRound(100)
 
       // model2 should terminate early before overfitting
@@ -497,8 +346,6 @@ class VerifyLightGBMClassifier extends Benchmarks with EstimatorFuzzing[LightGBM
         .setLearningRate(0.9)
         .setMinDataInLeaf(2)
         .setValidationIndicatorCol(validationCol)
-        .setUseBarrierExecutionMode(true) // added for DEBUG, so remove
-        .setUseSingleDatasetMode(true) // added for DEBUG, so remove
         .setEarlyStoppingRound(5)
 
       // Assert evaluation metric improves

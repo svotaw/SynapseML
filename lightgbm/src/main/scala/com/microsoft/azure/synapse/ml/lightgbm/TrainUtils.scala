@@ -124,7 +124,7 @@ private object TrainUtils extends Serializable {
       if (!state.isFinished && state.iteration < maxIterations) {
         iterationLoop(maxIterations)  // tail recursion
       } else {
-        state.bestIterResult
+        state.bestIterationResult
       }
     }
 
@@ -156,12 +156,12 @@ private object TrainUtils extends Serializable {
       if (state.bestScores(index) == null
           || cmp(evalScore, state.bestScore(index), state.ctx.trainingCtx.improvementTolerance)) {
         state.bestScore(index) = evalScore
-        state.bestIter(index) = state.iteration
+        state.bestIteration(index) = state.iteration
         state.bestScores(index) = evalResults.map(_._2)
-      } else if (state.iteration - state.bestIter(index) >= state.ctx.trainingCtx.earlyStoppingRound) {
+      } else if (state.iteration - state.bestIteration(index) >= state.ctx.trainingCtx.earlyStoppingRound) {
         state.isFinished = true
-        log.info("Early stopping, best iteration is " + state.bestIter(index))
-        state.bestIterResult = Some(state.bestIter(index))
+        log.info("Early stopping, best iteration is " + state.bestIteration(index))
+        state.bestIterationResult = Some(state.bestIteration(index))
       }
 
       (evalName, evalScore)
