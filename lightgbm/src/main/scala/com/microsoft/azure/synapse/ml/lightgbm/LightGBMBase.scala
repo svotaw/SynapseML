@@ -392,17 +392,12 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
   protected def trainOneDataBatch(dataset: Dataset[_], batchIndex: Int): TrainedModel = {
     val measures = new InstrumentationMeasures()
     setBatchPerformanceMeasure(batchIndex, measures)
-    val numTasksPerExecutor = ClusterUtil.getNumTasksPerExecutor(dataset.sparkSession, log)
-    // By default, we try to intelligently calculate the number of executors, but user can override this with numTasks
-    val numTasks =
-      if (getNumTasks > 0) getNumTasks
-      else {
-        val numExecutorTasks = ClusterUtil.getNumExecutorTasks(dataset.sparkSession, numTasksPerExecutor, log)
-        min(numExecutorTasks, dataset.rdd.getNumPartitions)
-      }
-    val df = prepareDataframe(dataset, numTasks)
 
+    val numTasksPerExecutor = ClusterUtil.getNumTasksPerExecutor(dataset.sparkSession, log)
+    val numTasks = determineNumTasks(dataset, getNumTasks, numTasksPerExecutor)
     val sc = dataset.sparkSession.sparkContext
+
+    val df = prepareDataframe(dataset, numTasks)
 
     val (trainingData, validationData) =
       if (get(validationIndicatorCol).isDefined && dataset.columns.contains(getValidationIndicatorCol))
@@ -424,8 +419,7 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       if (isStreamingMode) {
         val (sampledData, partitionCounts) = calculateRowStatistics(trainingData, trainParams, numCols, measures)
         (Some(sc.broadcast(sampledData)), Some(partitionCounts))
-      }
-      else (None, None)
+      } else (None, None)
 
     validateSlotNames(featuresSchema)
     executeTraining(
@@ -440,6 +434,15 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
       numTasks,
       numTasksPerExecutor,
       measures)
+  }
+
+  private def determineNumTasks(dataset: Dataset[_], configNumTasks: Int, numTasksPerExecutor: Int) = {
+    // By default, we try to intelligently calculate the number of executors, but user can override this with numTasks
+    if (configNumTasks > 0) configNumTasks
+    else {
+      val numExecutorTasks = ClusterUtil.getNumExecutorTasks(dataset.sparkSession, numTasksPerExecutor, log)
+      min(numExecutorTasks, dataset.rdd.getNumPartitions)
+    }
   }
 
   /**
@@ -525,23 +528,6 @@ trait LightGBMBase[TrainedModel <: Model[TrainedModel]] extends Estimator[Traine
     val collectedSampleData = rawSampleData.collect()
     measures.markSamplingStop()
 
-    // Make a wrapped object that formats the binary sample data as needed by LightGBM
-    /*val sampleData = new SampledData(numSamples, numCols)
-    rawSampleData.collect().foreach(row => sampleData.pushRow(row, featureColName))
-    measures.markSamplingStop()
-
-    // Get reference data set using sampled data
-    // Use driver node to run LightGBM in standalone mode
-    val datasetParams = getDatasetCreationParams(
-      trainingParams.generalParams.categoricalFeatures,
-      trainingParams.executionParams.numThreads)
-
-    val serializedReference = createReferenceDataset(totalNumRows.toInt,
-      numCols,
-      datasetParams,
-      sampleData,
-      trainingParams.generalParams.featureNames,
-      log)*/
     measures.markRowStatisticsStop()
     (collectedSampleData, rowCounts)
   }

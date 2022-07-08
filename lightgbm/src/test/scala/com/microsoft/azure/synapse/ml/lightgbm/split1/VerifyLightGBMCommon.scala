@@ -17,7 +17,7 @@ class VerifyLightGBMCommon extends TestBase with LightGBMTestUtils  {
   lazy val taskDF: DataFrame = loadBinary("task.train.csv", "TaskFailed10").cache()
   lazy val pimaDF: DataFrame = loadBinary("PimaIndian.csv", "Diabetes mellitus").cache()
 
-  lazy val baseModel = new LightGBMClassifier()
+  lazy val baseModel: LightGBMClassifier = new LightGBMClassifier()
     .setFeaturesCol(featuresCol)
     .setRawPredictionCol(rawPredCol)
     .setDefaultListenPort(getAndIncrementPort())
@@ -155,12 +155,12 @@ class VerifyLightGBMCommon extends TestBase with LightGBMTestUtils  {
     val totalTime = measures.totalTime
     assert(totalTime > 0)
     println(s"Total time: $totalTime")
-    val columnStatisticsTime = measures.columnStatisticsTime
+    val columnStatisticsTime = measures.columnStatisticsTime()
     assert(columnStatisticsTime > 0)
     println(s"Column statistics time: $columnStatisticsTime")
-    val rowStatisticsTime = measures.rowStatisticsTime
+    val rowStatisticsTime = measures.rowStatisticsTime()
     println(s"Row statistics time: $rowStatisticsTime")
-    val trainingTime = measures.trainingTime
+    val trainingTime = measures.trainingTime()
     assert(trainingTime > 0)
     println(s"Training time: $trainingTime")
 

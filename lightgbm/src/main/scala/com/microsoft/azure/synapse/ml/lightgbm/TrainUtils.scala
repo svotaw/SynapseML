@@ -76,17 +76,16 @@ private object TrainUtils extends Serializable {
 
   def updateOneIteration(state: PartitionTaskTrainingState, log: Logger): Unit = {
     try {
-      log.info("LightGBM running iteration: " + state.iteration + " with is finished: " + state.isFinished)
-        val fobj = state.ctx.trainingParams.objectiveParams.fobj
-        if (fobj.isDefined) {
-          val isClassification = state.ctx.trainingCtx.isClassification
-          val (gradient, hessian) = fobj.get.getGradient(
-            state.booster.innerPredict(0, isClassification), state.booster.trainDataset.get)
-          state.isFinished = state.booster.updateOneIterationCustom(gradient, hessian)
-        } else {
-          state.isFinished = state.booster.updateOneIteration()
-        }
-      log.info("LightGBM completed iteration: " + state.iteration + " with is finished: " + state.isFinished)
+      log.debug("LightGBM running iteration: " + state.iteration)
+      val fobj = state.ctx.trainingParams.objectiveParams.fobj
+      if (fobj.isDefined) {
+        val (gradient, hessian) = fobj.get.getGradient(
+          state.booster.innerPredict(0, state.ctx.trainingCtx.isClassification),
+          state.booster.trainDataset.get)
+        state.isFinished = state.booster.updateOneIterationCustom(gradient, hessian)
+      } else {
+        state.isFinished = state.booster.updateOneIteration()
+      }
     } catch {
       case e: java.lang.Exception =>
         log.warn("LightGBM reached early termination on one task," +
@@ -131,7 +130,7 @@ private object TrainUtils extends Serializable {
     log.info(s"Beginning training on LightGBM Booster for partition ${state.ctx.partitionId}")
     state.ctx.measures.markTrainingIterationsStart()
     val result = iterationLoop(state.ctx.trainingParams.generalParams.numIterations)
-    state.ctx.measures.markTrainingIterationsStart()
+    state.ctx.measures.markTrainingIterationsStop()
     result
   }
 
